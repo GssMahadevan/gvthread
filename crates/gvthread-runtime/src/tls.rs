@@ -60,3 +60,14 @@ pub fn current_gvthread_base() -> *mut u8 {
 pub fn is_in_gvthread() -> bool {
     CURRENT_GVTHREAD.with(|cell| cell.get() != GVTHREAD_NONE)
 }
+
+/// Try to get current worker ID, returns None if not on a worker thread
+#[inline]
+pub fn try_current_worker_id() -> Option<usize> {
+    let id = WORKER_ID.with(|cell| cell.get());
+    if id == usize::MAX {
+        None
+    } else {
+        Some(id)
+    }
+}

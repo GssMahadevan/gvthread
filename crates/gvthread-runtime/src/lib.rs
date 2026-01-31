@@ -23,6 +23,7 @@ pub mod timer;
 pub mod scheduler;
 pub mod tls;
 pub mod parking;
+pub mod ready_queue;
 
 // Re-exports
 pub use config::SchedulerConfig;
@@ -30,6 +31,7 @@ pub use scheduler::Scheduler;
 pub use worker::{WorkerPool, worker_states};
 pub use timer::{sleep, sleep_ms, sleep_us};
 pub use parking::{WorkerParking, new_parking};
+pub use ready_queue::{ReadyQueue, SimpleQueue};
 
 // Platform detection
 cfg_if::cfg_if! {

@@ -1,6 +1,6 @@
 //! Main scheduler implementation
 //!
-//! Orchestrates all components: memory, workers, timers, bitmaps.
+//! Orchestrates all components: memory, workers, timers, ready queue.
 
 use crate::config::SchedulerConfig;
 use crate::memory;
@@ -8,14 +8,13 @@ use crate::worker::{WorkerPool, set_current_worker_id, current_worker_state, wor
 use crate::timer::TimerThread;
 use crate::tls;
 use crate::current_arch;
-use crate::parking::{WorkerParking, new_parking};
+use crate::ready_queue::{ReadyQueue, SimpleQueue};
 
 use gvthread_core::id::GVThreadId;
 use gvthread_core::state::{GVThreadState, Priority};
 use gvthread_core::metadata::{GVThreadMetadata, VoluntarySavedRegs};
 use gvthread_core::constants::GVTHREAD_NONE;
 
-use gvthread_core::bitmap::ReadyBitmaps;
 use gvthread_core::slot::SlotAllocator;
 use gvthread_core::cancel::CancellationToken;
 use gvthread_core::error::{SchedError, SchedResult};
@@ -23,23 +22,13 @@ use gvthread_core::error::{SchedError, SchedResult};
 // Use kprint macros for debug output
 use gvthread_core::{kprintln, kdebug, kwarn};
 
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
-use std::sync::OnceLock;
-use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 
 /// Global scheduler instance
 static mut SCHEDULER: Option<Scheduler> = None;
 static SCHEDULER_INIT: AtomicBool = AtomicBool::new(false);
 static SCHEDULER_RUNNING: AtomicBool = AtomicBool::new(false);
-
-/// Global worker parking (futex-based on Linux)
-static WORKER_PARKING: OnceLock<Box<dyn WorkerParking>> = OnceLock::new();
-
-/// Get the global parking instance
-fn parking() -> &'static dyn WorkerParking {
-    WORKER_PARKING.get().expect("Parking not initialized").as_ref()
-}
 
 /// Per-worker scheduler context
 /// 
@@ -108,8 +97,8 @@ pub struct Scheduler {
     /// Slot allocator
     slot_allocator: SlotAllocator,
     
-    /// Ready bitmaps (one per priority)
-    ready_bitmaps: ReadyBitmaps,
+    /// Ready queue (per-worker local + global, Go-like)
+    ready_queue: Box<dyn ReadyQueue>,
     
     /// Worker thread pool
     worker_pool: Option<WorkerPool>,
@@ -126,9 +115,13 @@ impl Scheduler {
     pub fn new(config: SchedulerConfig) -> Self {
         config.validate().expect("Invalid scheduler configuration");
         
+        // Create and initialize ready queue
+        let mut ready_queue = SimpleQueue::new();
+        ready_queue.init(config.num_workers);
+        
         Self {
             slot_allocator: SlotAllocator::new(config.max_gvthreads),
-            ready_bitmaps: ReadyBitmaps::new(config.max_gvthreads, config.num_workers),
+            ready_queue: Box::new(ready_queue),
             worker_pool: None,
             timer_thread: None,
             running: AtomicBool::new(false),
@@ -219,16 +212,16 @@ impl Scheduler {
             );
         }
         
-        // Mark as ready
+        // Mark as ready and add to queue
         meta.set_state(GVThreadState::Ready);
-        self.ready_bitmaps.set_ready(id, priority);
+        self.ready_queue.push(id, priority, None);  // No worker hint for spawn
         
         id
     }
     
     /// Get next ready GVThread for a worker
-    pub fn get_next(&self, worker_id: usize, low_priority_only: bool) -> Option<(GVThreadId, Priority)> {
-        self.ready_bitmaps.find_and_claim(worker_id, low_priority_only)
+    pub fn get_next(&self, worker_id: usize, _low_priority_only: bool) -> Option<(GVThreadId, Priority)> {
+        self.ready_queue.pop(worker_id)
     }
     
     /// Mark a GVThread as ready
@@ -236,12 +229,14 @@ impl Scheduler {
         let meta_ptr = memory::get_metadata_ptr(id.as_u32());
         let meta = unsafe { &*meta_ptr };
         meta.set_state(GVThreadState::Ready);
-        self.ready_bitmaps.set_ready(id, priority);
+        // Use current worker as hint if available
+        let hint = tls::try_current_worker_id();
+        self.ready_queue.push(id, priority, hint);
     }
     
     /// Mark a GVThread as blocked
-    pub fn mark_blocked(&self, id: GVThreadId, priority: Priority) {
-        self.ready_bitmaps.clear_ready(id, priority);
+    pub fn mark_blocked(&self, id: GVThreadId, _priority: Priority) {
+        // Queue-based: no need to remove, it was already popped
         let meta_ptr = memory::get_metadata_ptr(id.as_u32());
         let meta = unsafe { &*meta_ptr };
         meta.set_state(GVThreadState::Blocked);
@@ -255,7 +250,9 @@ impl Scheduler {
         // Only wake if currently blocked
         if meta.get_state() == GVThreadState::Blocked {
             meta.set_state(GVThreadState::Ready);
-            self.ready_bitmaps.set_ready(id, priority);
+            // Use current worker as hint for locality
+            let hint = tls::try_current_worker_id();
+            self.ready_queue.push(id, priority, hint);
         }
     }
     
@@ -263,10 +260,9 @@ impl Scheduler {
     pub fn mark_finished(&self, id: GVThreadId) {
         let meta_ptr = memory::get_metadata_ptr(id.as_u32());
         let meta = unsafe { &*meta_ptr };
-        let priority = meta.get_priority();
         
         meta.set_state(GVThreadState::Finished);
-        self.ready_bitmaps.clear_ready(id, priority);
+        // Queue-based: no need to remove, it was already popped
         
         // Deactivate slot memory
         let _ = memory::memory_region().deactivate_slot(id.as_u32());
@@ -290,7 +286,7 @@ impl Scheduler {
         SCHEDULER_RUNNING.store(false, Ordering::Release);
         
         // Wake all parked workers so they can see the shutdown flag
-        parking().wake_all();
+        self.ready_queue.wake_all();
         
         // Give workers a moment to notice the flag
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -338,8 +334,6 @@ extern "C" fn gvthread_entry(closure_ptr: usize) {
 
 /// Main worker loop
 fn worker_main_loop(worker_id: usize, is_low_priority: bool, debug: bool) {
-    drop(Box::new([0u8; 64]));  // 64 bytes is enough to warm arena
-
     // Set up TLS
     set_current_worker_id(worker_id);
     
@@ -401,9 +395,13 @@ fn worker_main_loop(worker_id: usize, is_low_priority: bool, debug: bool) {
                     }
                     std::thread::yield_now();
                 } else {
-                    // Park on futex with timeout
+                    // Park via ready_queue's condvar
                     worker.is_parked.store(true, Ordering::Relaxed);
-                    parking().park(Some(std::time::Duration::from_millis(park_timeout_ms)));
+                    unsafe {
+                        if let Some(ref sched) = SCHEDULER {
+                            sched.ready_queue.park(worker_id, park_timeout_ms);
+                        }
+                    }
                     worker.is_parked.store(false, Ordering::Relaxed);
                     idle_spins = 0; // Reset after park
                 }
@@ -476,9 +474,10 @@ fn run_gvthread(worker_id: usize, id: GVThreadId, priority: Priority, debug: boo
     match state {
         GVThreadState::Ready => {
             // GVThread yielded - add back to ready queue
+            // Use current worker as hint for locality
             unsafe {
                 if let Some(ref sched) = SCHEDULER {
-                    sched.ready_bitmaps.set_ready(id, priority);
+                    sched.ready_queue.push(id, priority, Some(worker_id));
                 }
             }
         }
@@ -617,8 +616,7 @@ pub fn wake_gvthread(id: GVThreadId, priority: Priority) {
     unsafe {
         if let Some(ref sched) = SCHEDULER {
             sched.wake_gvthread(id, priority);
-            // Wake a parked worker to pick up the newly ready GVThread
-            parking().wake_one();
+            // Note: ready_queue.push() already wakes a parked worker
         }
     }
 }
@@ -651,8 +649,7 @@ where
             .spawn(f, priority)
     };
     
-    // Wake a parked worker to pick up the new work
-    parking().wake_one();
+    // Note: ready_queue.push() already wakes a parked worker
     
     id
 }
@@ -662,9 +659,6 @@ pub fn init_global_scheduler(config: SchedulerConfig) -> SchedResult<()> {
     if SCHEDULER_INIT.swap(true, Ordering::SeqCst) {
         return Err(SchedError::AlreadyInitialized);
     }
-    
-    // Initialize worker parking
-    let _ = WORKER_PARKING.set(new_parking());
     
     // Initialize the sleep queue with capacity for all possible GVThreads
     crate::timer::init_sleep_queue_with_capacity(config.max_gvthreads);
