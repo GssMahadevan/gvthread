@@ -592,8 +592,8 @@ pub fn init_global_scheduler(config: SchedulerConfig) -> SchedResult<()> {
         return Err(SchedError::AlreadyInitialized);
     }
     
-    // Initialize the sleep queue
-    crate::timer::init_sleep_queue();
+    // Initialize the sleep queue with capacity for all possible GVThreads
+    crate::timer::init_sleep_queue_with_capacity(config.max_gvthreads);
     
     unsafe {
         SCHEDULER = Some(Scheduler::new(config));

@@ -79,11 +79,16 @@ impl Eq for SleepEntry {}
 /// Global sleep queue
 static SLEEP_QUEUE: SpinLock<Option<BinaryHeap<SleepEntry>>> = SpinLock::new(None);
 
-/// Initialize the sleep queue
-pub fn init_sleep_queue() {
+/// Initialize the sleep queue with given capacity
+pub fn init_sleep_queue_with_capacity(capacity: usize) {
     let mut queue = SLEEP_QUEUE.lock();
-    // Pre-allocate for many sleeping GVThreads to avoid reallocation
-    *queue = Some(BinaryHeap::with_capacity(8192));
+    // Pre-allocate to avoid reallocation from GVThread stack
+    *queue = Some(BinaryHeap::with_capacity(capacity));
+}
+
+/// Initialize the sleep queue with default capacity
+pub fn init_sleep_queue() {
+    init_sleep_queue_with_capacity(65536);
 }
 
 /// Add a GVThread to the sleep queue
