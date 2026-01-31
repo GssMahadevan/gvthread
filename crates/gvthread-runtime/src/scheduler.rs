@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 
 /// Global scheduler instance
-static mut SCHEDULER: Option<Scheduler> = None;
+pub(crate) static mut SCHEDULER: Option<Scheduler> = None;
 static SCHEDULER_INIT: AtomicBool = AtomicBool::new(false);
 static SCHEDULER_RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -98,7 +98,7 @@ pub struct Scheduler {
     slot_allocator: SlotAllocator,
     
     /// Ready queue (per-worker local + global, Go-like)
-    ready_queue: Box<dyn ReadyQueue>,
+    pub(crate) ready_queue: Box<dyn ReadyQueue>,
     
     /// Worker thread pool
     worker_pool: Option<WorkerPool>,
@@ -143,7 +143,7 @@ impl Scheduler {
         
         // Start timer thread
         let mut timer = TimerThread::new(&self.config);
-        timer.start(self.config.num_workers);
+        timer.start(self.config.num_workers, self.config.max_gvthreads);
         self.timer_thread = Some(timer);
         
         // Start worker threads

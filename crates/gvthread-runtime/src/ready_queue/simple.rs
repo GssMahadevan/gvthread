@@ -271,6 +271,10 @@ impl ReadyQueue for SimpleQueue {
         
         // Fall back to global
         self.global.push(gid);
+        // Wake a parked worker to process this
+        if self.global.parked_count() > 0 {
+            self.global.wake_one();
+        }
     }
     
     fn pop(&self, worker_id: usize) -> Option<(GVThreadId, Priority)> {
