@@ -103,6 +103,9 @@ pub use gvthread_core::{env_get, env_get_bool, env_get_opt, env_get_str, env_is_
 pub use gvthread_runtime::{
     SchedulerConfig,
     Scheduler,
+    sleep,
+    sleep_ms,
+    sleep_us,
 };
 
 use gvthread_runtime::scheduler;

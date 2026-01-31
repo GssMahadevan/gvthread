@@ -27,6 +27,7 @@ pub mod tls;
 pub use config::SchedulerConfig;
 pub use scheduler::Scheduler;
 pub use worker::{WorkerPool, worker_states};
+pub use timer::{sleep, sleep_ms, sleep_us};
 
 // Platform detection
 cfg_if::cfg_if! {

@@ -67,6 +67,7 @@ pub struct GVThreadMetadata {
 
 /// Saved registers for voluntary yield (callee-saved per System V AMD64 ABI)
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct VoluntarySavedRegs {
     pub rsp: u64,
     pub rip: u64,

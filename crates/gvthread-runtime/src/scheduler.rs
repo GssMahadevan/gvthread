@@ -45,6 +45,7 @@ struct WorkerSchedulerContexts {
 
 /// Scheduler context for a single worker
 #[repr(C, align(64))]
+#[derive(Clone, Copy)]
 struct SchedulerContext {
     /// Saved registers when switching to a GVThread
     regs: VoluntarySavedRegs,
@@ -234,6 +235,18 @@ impl Scheduler {
         let meta_ptr = memory::get_metadata_ptr(id.as_u32());
         let meta = unsafe { &*meta_ptr };
         meta.set_state(GVThreadState::Blocked);
+    }
+    
+    /// Wake a blocked GVThread (make it ready again)
+    pub fn wake_gvthread(&self, id: GVThreadId, priority: Priority) {
+        let meta_ptr = memory::get_metadata_ptr(id.as_u32());
+        let meta = unsafe { &*meta_ptr };
+        
+        // Only wake if currently blocked
+        if meta.get_state() == GVThreadState::Blocked {
+            meta.set_state(GVThreadState::Ready);
+            self.ready_bitmaps.set_ready(id, priority);
+        }
     }
     
     /// Mark a GVThread as finished and clean up
@@ -508,6 +521,59 @@ pub fn yield_now() {
     meta.clear_preempt();
 }
 
+/// Block the current GVThread
+/// 
+/// Marks the GVThread as Blocked and yields to the scheduler.
+/// The GVThread will NOT be added to the ready queue - it must be
+/// explicitly woken by calling `wake_gvthread`.
+///
+/// Used by sleep, channels, mutexes, etc.
+pub fn block_current() {
+    if !tls::is_in_gvthread() {
+        return;
+    }
+    
+    let gvthread_id = tls::current_gvthread_id();
+    let meta_base = tls::current_gvthread_base();
+    let worker_id = crate::worker::current_worker_id();
+    
+    if meta_base.is_null() || gvthread_id.is_none() {
+        return;
+    }
+    
+    let meta = unsafe { &*(meta_base as *const GVThreadMetadata) };
+    
+    // Mark as Blocked - scheduler will NOT re-add to ready queue
+    meta.set_state(GVThreadState::Blocked);
+    
+    // Get our saved registers
+    let gvthread_regs = unsafe {
+        (meta_base).add(0x40) as *mut VoluntarySavedRegs
+    };
+    
+    // Get scheduler context for this worker
+    let sched_ctx = get_worker_sched_context(worker_id);
+    
+    // Switch back to scheduler
+    unsafe {
+        current_arch::context_switch_voluntary(gvthread_regs, sched_ctx);
+    }
+    
+    // When we get here, we've been woken and resumed
+    meta.clear_preempt();
+}
+
+/// Wake a blocked GVThread (make it ready again)
+/// 
+/// Called by timer (for sleep) or synchronization primitives.
+pub fn wake_gvthread(id: GVThreadId, priority: Priority) {
+    unsafe {
+        if let Some(ref sched) = SCHEDULER {
+            sched.wake_gvthread(id, priority);
+        }
+    }
+}
+
 /// Spawn a new GVThread (uses global scheduler)
 pub fn spawn<F>(f: F, priority: Priority) -> GVThreadId
 where
@@ -525,6 +591,9 @@ pub fn init_global_scheduler(config: SchedulerConfig) -> SchedResult<()> {
     if SCHEDULER_INIT.swap(true, Ordering::SeqCst) {
         return Err(SchedError::AlreadyInitialized);
     }
+    
+    // Initialize the sleep queue
+    crate::timer::init_sleep_queue();
     
     unsafe {
         SCHEDULER = Some(Scheduler::new(config));

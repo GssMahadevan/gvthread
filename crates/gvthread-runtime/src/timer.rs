@@ -2,13 +2,21 @@
 //!
 //! The timer thread periodically checks all workers to detect
 //! GVThreads that have been running too long without yielding.
+//! Also handles the sleep queue for GVThread-aware sleeping.
 
 use crate::worker::worker_states;
 use crate::config::SchedulerConfig;
+use crate::tls;
+use crate::scheduler;
+use gvthread_core::id::GVThreadId;
+use gvthread_core::state::Priority;
+use gvthread_core::SpinLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+use std::collections::BinaryHeap;
+use std::cmp::Ordering as CmpOrdering;
 
 /// Timer thread state
 pub struct TimerThread {
@@ -32,6 +40,143 @@ struct WorkerWatch {
     
     /// Time when we first saw the counter unchanged
     first_stall_time: Option<Instant>,
+}
+
+// ============================================================================
+// Sleep Queue
+// ============================================================================
+
+/// Entry in the sleep queue
+#[derive(Debug, Clone, Copy)]
+struct SleepEntry {
+    wake_time_ns: u64,
+    gvthread_id: GVThreadId,
+    priority: Priority,
+}
+
+// Ordering for min-heap (smallest wake_time first)
+impl Ord for SleepEntry {
+    fn cmp(&self, other: &Self) -> CmpOrdering {
+        // Reverse order for min-heap
+        other.wake_time_ns.cmp(&self.wake_time_ns)
+    }
+}
+
+impl PartialOrd for SleepEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for SleepEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.wake_time_ns == other.wake_time_ns
+    }
+}
+
+impl Eq for SleepEntry {}
+
+/// Global sleep queue
+static SLEEP_QUEUE: SpinLock<Option<BinaryHeap<SleepEntry>>> = SpinLock::new(None);
+
+/// Initialize the sleep queue
+pub fn init_sleep_queue() {
+    let mut queue = SLEEP_QUEUE.lock();
+    *queue = Some(BinaryHeap::with_capacity(1024));
+}
+
+/// Add a GVThread to the sleep queue
+fn add_to_sleep_queue(entry: SleepEntry) {
+    let mut queue = SLEEP_QUEUE.lock();
+    if let Some(ref mut q) = *queue {
+        q.push(entry);
+    }
+}
+
+/// Process sleep queue - wake up GVThreads whose time has come
+/// Called by timer thread
+fn process_sleep_queue() {
+    let now = now_ns();
+    
+    loop {
+        // Peek at the next entry
+        let entry = {
+            let mut queue = SLEEP_QUEUE.lock();
+            if let Some(ref mut q) = *queue {
+                if let Some(entry) = q.peek() {
+                    if entry.wake_time_ns <= now {
+                        q.pop()
+                    } else {
+                        None // Not time yet
+                    }
+                } else {
+                    None // Queue empty
+                }
+            } else {
+                None
+            }
+        };
+        
+        match entry {
+            Some(entry) => {
+                // Wake up this GVThread
+                scheduler::wake_gvthread(entry.gvthread_id, entry.priority);
+            }
+            None => break, // No more entries ready
+        }
+    }
+}
+
+/// Sleep the current GVThread for the specified duration
+/// 
+/// This yields the GVThread and schedules it to wake up after the duration.
+/// Unlike `std::thread::sleep`, this does NOT block the worker thread.
+///
+/// # Panics
+/// Panics if called from outside a GVThread.
+pub fn sleep(duration: Duration) {
+    if !tls::is_in_gvthread() {
+        // Fallback for non-GVThread context
+        std::thread::sleep(duration);
+        return;
+    }
+    
+    let gvthread_id = tls::current_gvthread_id();
+    let meta_base = tls::current_gvthread_base();
+    
+    if meta_base.is_null() {
+        std::thread::sleep(duration);
+        return;
+    }
+    
+    // Get priority from metadata
+    let meta = unsafe { &*(meta_base as *const gvthread_core::GVThreadMetadata) };
+    let priority = meta.get_priority();
+    
+    // Calculate wake time
+    let wake_time_ns = now_ns() + duration.as_nanos() as u64;
+    
+    // Add to sleep queue
+    add_to_sleep_queue(SleepEntry {
+        wake_time_ns,
+        gvthread_id,
+        priority,
+    });
+    
+    // Mark as blocked and yield
+    scheduler::block_current();
+}
+
+/// Sleep for specified milliseconds
+#[inline]
+pub fn sleep_ms(ms: u64) {
+    sleep(Duration::from_millis(ms));
+}
+
+/// Sleep for specified microseconds
+#[inline]
+pub fn sleep_us(us: u64) {
+    sleep(Duration::from_micros(us));
 }
 
 impl TimerThread {
@@ -104,6 +249,12 @@ fn timer_loop(
     
     while !shutdown.load(Ordering::Acquire) {
         thread::sleep(check_interval);
+        
+        // Update coarse time for low-overhead access
+        update_coarse_time();
+        
+        // Process sleep queue - wake up sleeping GVThreads
+        process_sleep_queue();
         
         let now = Instant::now();
         
