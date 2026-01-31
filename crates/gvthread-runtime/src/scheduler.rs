@@ -311,12 +311,24 @@ impl Scheduler {
 
 /// Entry point for GVThread execution
 extern "C" fn gvthread_entry(closure_ptr: usize) {
-    // Reconstruct the boxed closure
+    // CRITICAL: No heap allocations in this function!
+    // We're running on GVThread's custom stack, malloc gets confused.
+    
+    // Reconstruct the boxed closure (this is from_raw, not allocating)
     let boxed: Box<Box<dyn FnOnce(&CancellationToken) + Send>> = 
         unsafe { Box::from_raw(closure_ptr as *mut _) };
     
-    // Create cancellation token for this GVThread
-    let token = CancellationToken::new();
+    // Get cancellation token from metadata (no allocation!)
+    // The token was created in spawn() and stored in metadata
+    let meta_base = crate::tls::current_gvthread_base();
+    let token = if !meta_base.is_null() {
+        let meta = unsafe { &*(meta_base as *const GVThreadMetadata) };
+        // Create a lightweight token that reads from metadata's cancelled field
+        CancellationToken::from_metadata(meta)
+    } else {
+        // Fallback - should not happen
+        CancellationToken::dummy()
+    };
     
     // Run the closure
     (*boxed)(&token);

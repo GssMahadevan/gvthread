@@ -16,3 +16,4 @@ cfg-if.workspace = true
 [features]
 default = []
 debug-assertions = []
+# large-stack = []  # Use 16MB stacks instead of 16KB

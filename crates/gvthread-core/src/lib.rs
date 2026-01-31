@@ -55,7 +55,6 @@ pub mod constants {
     /// Slot size - configurable via feature flag
     /// Default: 16KB (4 pages) for debugging, gives ~8KB usable stack
     /// For production: rebuild with larger size or use GVT_SLOT_PAGES env
-    /// cargo build --features large-stack -p gvthread-playground
     #[cfg(feature = "large-stack")]
     pub const SLOT_SIZE: usize = 16 * 1024 * 1024;  // 16 MB
     

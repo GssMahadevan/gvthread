@@ -3,9 +3,10 @@
 //! GVThreads can check for cancellation via their token and exit gracefully.
 //! Tokens can be linked to form parent-child relationships.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use crate::error::{SchedError, SchedResult};
+use crate::metadata::GVThreadMetadata;
 
 /// Token for checking and triggering cancellation
 ///
@@ -17,10 +18,20 @@ use crate::error::{SchedError, SchedResult};
 /// parent GVThreads to children.
 #[derive(Clone)]
 pub struct CancellationToken {
-    inner: Arc<CancellationInner>,
+    inner: CancellationInner,
 }
 
-struct CancellationInner {
+#[derive(Clone)]
+enum CancellationInner {
+    /// Heap-allocated token with Arc (for tokens created outside GVThread)
+    Owned(Arc<OwnedCancellation>),
+    /// Reference to metadata's cancelled field (no allocation)
+    Metadata(*const AtomicU8),
+    /// Dummy token that never cancels
+    Dummy,
+}
+
+struct OwnedCancellation {
     /// Cancellation flag
     cancelled: AtomicBool,
     
@@ -28,26 +39,52 @@ struct CancellationInner {
     parent: Option<CancellationToken>,
 }
 
+// Safety: CancellationInner::Metadata points to GVThreadMetadata which is thread-safe
+unsafe impl Send for CancellationToken {}
+unsafe impl Sync for CancellationToken {}
+
 impl CancellationToken {
-    /// Create a new independent cancellation token
+    /// Create a new independent cancellation token (heap allocated)
+    /// 
+    /// WARNING: Do not call from GVThread stack! Use from_metadata instead.
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(CancellationInner {
+            inner: CancellationInner::Owned(Arc::new(OwnedCancellation {
                 cancelled: AtomicBool::new(false),
                 parent: None,
-            }),
+            })),
+        }
+    }
+    
+    /// Create a token that reads from GVThreadMetadata's cancelled field
+    /// 
+    /// This does NOT allocate and is safe to call from GVThread stack.
+    pub fn from_metadata(meta: &GVThreadMetadata) -> Self {
+        Self {
+            inner: CancellationInner::Metadata(&meta.cancelled as *const AtomicU8),
+        }
+    }
+    
+    /// Create a dummy token that never cancels
+    /// 
+    /// This does NOT allocate and is safe to call from GVThread stack.
+    pub fn dummy() -> Self {
+        Self {
+            inner: CancellationInner::Dummy,
         }
     }
     
     /// Create a child token linked to this one
     ///
     /// If this token is cancelled, checking the child will also return cancelled.
+    /// 
+    /// WARNING: This allocates! Do not call from GVThread stack.
     pub fn child(&self) -> Self {
         Self {
-            inner: Arc::new(CancellationInner {
+            inner: CancellationInner::Owned(Arc::new(OwnedCancellation {
                 cancelled: AtomicBool::new(false),
                 parent: Some(self.clone()),
-            }),
+            })),
         }
     }
     
@@ -56,17 +93,24 @@ impl CancellationToken {
     /// Also checks parent tokens recursively.
     #[inline]
     pub fn is_cancelled(&self) -> bool {
-        // Check own flag first (most common case)
-        if self.inner.cancelled.load(Ordering::Acquire) {
-            return true;
+        match &self.inner {
+            CancellationInner::Owned(arc) => {
+                // Check own flag first (most common case)
+                if arc.cancelled.load(Ordering::Acquire) {
+                    return true;
+                }
+                // Check parent chain
+                if let Some(ref parent) = arc.parent {
+                    return parent.is_cancelled();
+                }
+                false
+            }
+            CancellationInner::Metadata(ptr) => {
+                // Read from metadata's cancelled field
+                unsafe { (**ptr).load(Ordering::Acquire) != 0 }
+            }
+            CancellationInner::Dummy => false,
         }
-        
-        // Check parent chain
-        if let Some(ref parent) = self.inner.parent {
-            return parent.is_cancelled();
-        }
-        
-        false
     }
     
     /// Request cancellation
@@ -74,7 +118,15 @@ impl CancellationToken {
     /// This only sets this token's flag, not parent's.
     /// Child tokens will see cancellation when they check.
     pub fn cancel(&self) {
-        self.inner.cancelled.store(true, Ordering::Release);
+        match &self.inner {
+            CancellationInner::Owned(arc) => {
+                arc.cancelled.store(true, Ordering::Release);
+            }
+            CancellationInner::Metadata(ptr) => {
+                unsafe { (**ptr).store(1, Ordering::Release); }
+            }
+            CancellationInner::Dummy => {}
+        }
     }
     
     /// Check if cancelled and return error if so
@@ -84,7 +136,7 @@ impl CancellationToken {
     /// fn my_gvthread(token: &CancellationToken) -> SchedResult<()> {
     ///     loop {
     ///         token.check()?;  // Returns Err(Cancelled) if cancelled
-    ///         // ... do work ...
+    ///         // ... do work ...\
     ///     }
     /// }
     /// ```
@@ -111,7 +163,15 @@ impl CancellationToken {
     ///
     /// Warning: This does not affect child tokens or parent tokens.
     pub fn reset(&self) {
-        self.inner.cancelled.store(false, Ordering::Release);
+        match &self.inner {
+            CancellationInner::Owned(arc) => {
+                arc.cancelled.store(false, Ordering::Release);
+            }
+            CancellationInner::Metadata(ptr) => {
+                unsafe { (**ptr).store(0, Ordering::Release); }
+            }
+            CancellationInner::Dummy => {}
+        }
     }
 }
 
@@ -125,7 +185,6 @@ impl std::fmt::Debug for CancellationToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CancellationToken")
             .field("cancelled", &self.is_cancelled())
-            .field("has_parent", &self.inner.parent.is_some())
             .finish()
     }
 }
@@ -203,5 +262,13 @@ mod tests {
         
         token1.cancel();
         assert!(token2.is_cancelled());
+    }
+    
+    #[test]
+    fn test_dummy_token() {
+        let token = CancellationToken::dummy();
+        assert!(!token.is_cancelled());
+        token.cancel(); // Should be no-op
+        assert!(!token.is_cancelled());
     }
 }
