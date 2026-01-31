@@ -12,7 +12,7 @@
 //! - `GVT_KPRINT_TIME=1` - Show timestamps
 
 use gvthread::{Runtime, spawn, yield_now, sleep_ms, SchedulerConfig, GVThreadId};
-use gvthread::{env_get, env_get_bool, kinfo, kerror};
+use gvthread::{env_get, env_get_bool, kinfo};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -83,43 +83,20 @@ fn main() {
         kinfo!("Spawned {} GVThreads (IDs 0..{})", spawned_count, 
                spawn_ids.last().map(|id| id.as_u32()).unwrap_or(0));
         
-        // Wait for completion
+        // Wait for completion (no timeout - Ctrl-C to abort)
         let start = std::time::Instant::now();
-        let timeout_secs = if sleep_time_ms > 0 {
-            // Allow more time when sleeping
-            60 + (total_gvthreads as u64 * yields_per_gvthread as u64 * sleep_time_ms / 1000)
-        } else {
-            30
-        };
-        let timeout = std::time::Duration::from_secs(timeout_secs);
-        let mut last_completed = 0;
-        let mut stall_count = 0;
+        let mut last_print = std::time::Instant::now();
         
         while completed.load(Ordering::SeqCst) < total_gvthreads {
-            if start.elapsed() > timeout {
-                kerror!("TIMEOUT after {}s!", timeout_secs);
-                break;
-            }
-            
             std::thread::sleep(std::time::Duration::from_millis(100));
             
-            let current_completed = completed.load(Ordering::SeqCst);
-            if current_completed == last_completed {
-                stall_count += 1;
-                // Allow longer stalls when using sleep
-                let stall_limit = if sleep_time_ms > 0 { 50 } else { 20 };
-                if stall_count >= stall_limit {
-                    kerror!("STALL detected - no progress for {}s", stall_limit / 10);
-                    kerror!("  spawned={}, started={}, completed={}, yields={}",
-                           spawned.load(Ordering::SeqCst),
-                           started.load(Ordering::SeqCst),
-                           current_completed,
-                           total_yields.load(Ordering::SeqCst));
-                    break;
-                }
-            } else {
-                stall_count = 0;
-                last_completed = current_completed;
+            // Progress indicator every 5 seconds
+            if last_print.elapsed() >= std::time::Duration::from_secs(5) {
+                let c = completed.load(Ordering::SeqCst);
+                let y = total_yields.load(Ordering::SeqCst);
+                eprintln!("[PROGRESS] completed={}/{}, yields={}/{}", 
+                         c, total_gvthreads, y, total_gvthreads * yields_per_gvthread);
+                last_print = std::time::Instant::now();
             }
         }
         

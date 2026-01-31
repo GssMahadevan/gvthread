@@ -242,10 +242,16 @@ impl Scheduler {
         let meta_ptr = memory::get_metadata_ptr(id.as_u32());
         let meta = unsafe { &*meta_ptr };
         
+        let current_state = meta.get_state();
+        kdebug!("Scheduler::wake_gvthread: id={} current_state={:?}", id.as_u32(), current_state);
+        
         // Only wake if currently blocked
-        if meta.get_state() == GVThreadState::Blocked {
+        if current_state == GVThreadState::Blocked {
             meta.set_state(GVThreadState::Ready);
             self.ready_bitmaps.set_ready(id, priority);
+            kdebug!("Scheduler::wake_gvthread: id={} now Ready", id.as_u32());
+        } else {
+            kwarn!("Scheduler::wake_gvthread: id={} not Blocked (was {:?})", id.as_u32(), current_state);
         }
     }
     
@@ -543,6 +549,8 @@ pub fn block_current() {
     
     let meta = unsafe { &*(meta_base as *const GVThreadMetadata) };
     
+    kdebug!("block_current: GVThread {} blocking", gvthread_id.as_u32());
+    
     // Mark as Blocked - scheduler will NOT re-add to ready queue
     meta.set_state(GVThreadState::Blocked);
     
@@ -560,6 +568,7 @@ pub fn block_current() {
     }
     
     // When we get here, we've been woken and resumed
+    kdebug!("block_current: GVThread {} resumed", gvthread_id.as_u32());
     meta.clear_preempt();
 }
 
@@ -569,7 +578,10 @@ pub fn block_current() {
 pub fn wake_gvthread(id: GVThreadId, priority: Priority) {
     unsafe {
         if let Some(ref sched) = SCHEDULER {
+            kdebug!("wake_gvthread: waking {} with priority {:?}", id.as_u32(), priority);
             sched.wake_gvthread(id, priority);
+        } else {
+            kwarn!("wake_gvthread: no scheduler!");
         }
     }
 }
