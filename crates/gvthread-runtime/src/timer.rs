@@ -108,18 +108,11 @@ fn drain_pending_sleeps() {
         let pos = read_pos % ring.slots.len();
         
         // CRITICAL: Writer does fetch_add THEN store. We might read before store completes.
-        // Spin-wait briefly for the value to be written.
-        let mut value = ring.slots[pos].load(Ordering::Acquire);
-        let mut spins = 0;
-        while value == 0 && spins < 1000 {
-            std::hint::spin_loop();
-            value = ring.slots[pos].load(Ordering::Acquire);
-            spins += 1;
-        }
+        let value = ring.slots[pos].load(Ordering::Acquire);
         
         if value == 0 {
-            // Writer is very slow - stop here and retry next timer tick
-            // Don't update read_pos so we'll retry this slot
+            // Writer claimed slot but hasn't written yet.
+            // Stop here and retry on next timer tick (~1-10ms delay, acceptable for sleep).
             break;
         }
         
