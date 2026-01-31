@@ -10,3 +10,5 @@ path = "src/main.rs"
 
 [dependencies]
 gvthread.workspace = true
+
+jemallocator = "0.5"

@@ -338,6 +338,8 @@ extern "C" fn gvthread_entry(closure_ptr: usize) {
 
 /// Main worker loop
 fn worker_main_loop(worker_id: usize, is_low_priority: bool, debug: bool) {
+    drop(Box::new([0u8; 64]));  // 64 bytes is enough to warm arena
+
     // Set up TLS
     set_current_worker_id(worker_id);
     
