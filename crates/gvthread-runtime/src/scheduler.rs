@@ -374,10 +374,6 @@ fn run_gvthread(worker_id: usize, id: GVThreadId, priority: Priority, debug: boo
     meta.worker_id.store(worker_id as u32, Ordering::Relaxed);
     meta.clear_preempt(); // Clear any preempt flag from previous run
     
-    if debug {
-        eprintln!("[worker-{}] Switching to GVThread {} (priority={:?})", worker_id, id, priority);
-    }
-    
     // Get scheduler context save area for this worker
     let sched_ctx = get_worker_sched_context(worker_id);
     
@@ -385,6 +381,13 @@ fn run_gvthread(worker_id: usize, id: GVThreadId, priority: Priority, debug: boo
     let gvthread_regs = unsafe {
         (meta_ptr as *mut u8).add(0x40) as *mut VoluntarySavedRegs
     };
+    
+    if debug {
+        // Debug: print the RIP we're about to jump to
+        let regs = unsafe { &*gvthread_regs };
+        eprintln!("[worker-{}] Switching to GVThread {} (priority={:?}) rip=0x{:x} rsp=0x{:x}", 
+                  worker_id, id, priority, regs.rip, regs.rsp);
+    }
     
     // Perform the context switch!
     // This saves our current state to sched_ctx, then loads from gvthread_regs.
@@ -407,8 +410,14 @@ fn run_gvthread(worker_id: usize, id: GVThreadId, priority: Priority, debug: boo
     
     match state {
         GVThreadState::Ready => {
-            // GVThread yielded voluntarily - it's already been re-added to the queue
-            // by yield_now(), so nothing to do here
+            // GVThread yielded voluntarily.
+            // Now that context is safely saved, add back to ready queue.
+            // (yield_now() intentionally doesn't add to queue to avoid race condition)
+            unsafe {
+                if let Some(ref sched) = SCHEDULER {
+                    sched.ready_bitmaps.set_ready(id, priority);
+                }
+            }
         }
         GVThreadState::Finished => {
             // GVThread completed - clean it up
@@ -449,6 +458,10 @@ fn run_gvthread(worker_id: usize, id: GVThreadId, priority: Priority, debug: boo
 /// Saves the GVThread's context, marks it as Ready, and switches
 /// back to the scheduler context. The scheduler will then pick
 /// the next GVThread to run.
+/// 
+/// IMPORTANT: We set state = Ready but do NOT add to the ready bitmap here.
+/// The run_gvthread() function adds us back after the context switch completes.
+/// This prevents a race where another worker picks us up before we've saved our context.
 pub fn yield_now() {
     if !tls::is_in_gvthread() {
         // Not in a GVThread, just yield OS thread
@@ -463,22 +476,18 @@ pub fn yield_now() {
     
     // Safety check
     if meta_base.is_null() || gvthread_id.is_none() {
+        eprintln!("[yield_now] ERROR: null meta_base or invalid gvthread_id!");
         std::thread::yield_now();
         return;
     }
     
     let meta = unsafe { &*(meta_base as *const GVThreadMetadata) };
-    let priority = meta.get_priority();
     
-    // Mark as Ready before switching (so scheduler can see it)
+    // Mark as Ready - but do NOT add to bitmap yet!
+    // run_gvthread() will add us after context switch returns.
+    // This prevents the race where another worker picks us up
+    // before we've saved our context.
     meta.set_state(GVThreadState::Ready);
-    
-    // Re-add to the ready queue
-    unsafe {
-        if let Some(ref sched) = SCHEDULER {
-            sched.ready_bitmaps.set_ready(gvthread_id, priority);
-        }
-    }
     
     // Bump activity counter for preemption tracking
     let worker = current_worker_state();
@@ -492,6 +501,15 @@ pub fn yield_now() {
     // Get scheduler context for this worker
     let sched_ctx = get_worker_sched_context(worker_id);
     
+    // DEBUG: Print addresses before context switch
+    eprintln!("[yield_now] gvthread={} worker={} regs_ptr={:p} sched_ptr={:p}",
+              gvthread_id, worker_id, gvthread_regs, sched_ctx);
+    
+    // DEBUG: Print current RIP in gvthread_regs BEFORE we save
+    let regs_before = unsafe { &*gvthread_regs };
+    eprintln!("[yield_now] BEFORE: rip=0x{:x} rsp=0x{:x}", 
+              regs_before.rip, regs_before.rsp);
+    
     // Switch back to scheduler
     // This saves our state to gvthread_regs and restores sched_ctx,
     // returning control to run_gvthread() right after its context_switch call.
@@ -500,6 +518,9 @@ pub fn yield_now() {
     }
     
     // When we get here, we've been resumed by a worker.
+    // DEBUG: Print that we resumed
+    eprintln!("[yield_now] RESUMED on worker={}", crate::worker::current_worker_id());
+    
     // Clear preempt flag in case it was set
     meta.clear_preempt();
 }

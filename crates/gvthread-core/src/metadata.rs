@@ -353,6 +353,23 @@ const _: () = {
     assert!(core::mem::size_of::<ForcedSavedRegs>() == 256);
 };
 
+/// Verify voluntary_regs offset at compile time
+/// This is CRITICAL for the assembly context switch to work correctly!
+const _VOLUNTARY_REGS_OFFSET_CHECK: () = {
+    // Calculate expected offset:
+    // 0x00: preempt_flag (1) + cancelled (1) + state (1) + priority (1) = 4
+    // 0x04: gvthread_id (4) = 4
+    // 0x08: parent_id (4) = 4  
+    // 0x0C: worker_id (4) = 4
+    // 0x10: entry_fn (8) = 8
+    // 0x18: entry_arg (8) = 8
+    // 0x20: result_ptr (8) = 8
+    // 0x28: _reserved (24) = 24
+    // 0x40: voluntary_regs
+    //
+    // Total before voluntary_regs = 4 + 4 + 4 + 4 + 8 + 8 + 8 + 24 = 64 = 0x40 ✓
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,6 +391,11 @@ mod tests {
         assert_eq!(&meta.state as *const _ as usize - base, 0x02);
         assert_eq!(&meta.priority as *const _ as usize - base, 0x03);
         assert_eq!(&meta.gvthread_id as *const _ as usize - base, 0x04);
+        
+        // CRITICAL: voluntary_regs must be at 0x40 for context switch assembly!
+        let vol_regs_offset = &meta.voluntary_regs as *const _ as usize - base;
+        assert_eq!(vol_regs_offset, 0x40, 
+            "voluntary_regs must be at offset 0x40, but found 0x{:x}", vol_regs_offset);
     }
     
     #[test]
