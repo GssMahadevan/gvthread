@@ -303,6 +303,9 @@ fn worker_main_loop(worker_id: usize, is_low_priority: bool, debug: bool) {
     // Set up TLS
     set_current_worker_id(worker_id);
     
+    // Set kprint context for this worker thread
+    gvthread_core::kprint::set_worker_id(worker_id as u32);
+    
     // Store thread ID in worker state
     let worker = current_worker_state();
     worker.thread_id.store(
@@ -311,7 +314,7 @@ fn worker_main_loop(worker_id: usize, is_low_priority: bool, debug: bool) {
     );
     
     if debug {
-        kdebug!("[worker-{}] Started (low_priority={})", worker_id, is_low_priority);
+        kdebug!("Started (low_priority={})", is_low_priority);
     }
     
     // Main loop
@@ -319,7 +322,7 @@ fn worker_main_loop(worker_id: usize, is_low_priority: bool, debug: bool) {
         // Check for shutdown
         if !SCHEDULER_RUNNING.load(Ordering::Acquire) {
             if debug {
-                kdebug!("[worker-{}] Shutdown signaled, exiting", worker_id);
+                kdebug!("Shutdown signaled, exiting");
             }
             break;
         }
@@ -347,6 +350,9 @@ fn worker_main_loop(worker_id: usize, is_low_priority: bool, debug: bool) {
             }
         }
     }
+    
+    // Clear kprint context on exit
+    gvthread_core::kprint::clear_worker_id();
 }
 
 /// Run a GVThread on this worker
@@ -372,13 +378,16 @@ fn run_gvthread(worker_id: usize, id: GVThreadId, priority: Priority, debug: boo
     // Update TLS
     tls::set_current_gvthread(id, meta_ptr as *mut u8);
     
+    // Set kprint gvthread context
+    gvthread_core::kprint::set_gvthread_id(id.as_u32());
+    
     // Update GVThread state
     meta.set_state(GVThreadState::Running);
     meta.worker_id.store(worker_id as u32, Ordering::Relaxed);
     meta.clear_preempt();
     
     if debug {
-        kdebug!("[worker-{}] Running GVThread {} ({:?})", worker_id, id, priority);
+        kdebug!("Running GVThread {} ({:?})", id, priority);
     }
     
     // Get scheduler context save area for this worker
@@ -394,11 +403,14 @@ fn run_gvthread(worker_id: usize, id: GVThreadId, priority: Priority, debug: boo
         current_arch::context_switch_voluntary(sched_ctx, gvthread_regs);
     }
     
-    // We're back! Handle based on GVThread state
+    // We're back from GVThread - clear gvthread context for kprint
+    gvthread_core::kprint::clear_gvthread_id();
+    
+    // Handle based on GVThread state
     let state = meta.get_state();
     
     if debug {
-        kdebug!("[worker-{}] GVThread {} returned ({:?})", worker_id, id, state);
+        kdebug!("GVThread {} returned ({:?})", id, state);
     }
     
     match state {
@@ -431,7 +443,7 @@ fn run_gvthread(worker_id: usize, id: GVThreadId, priority: Priority, debug: boo
         }
         _ => {
             if debug {
-                kwarn!("[worker-{}] unexpected state {:?}", worker_id, state);
+                kwarn!("unexpected state {:?}", state);
             }
         }
     }

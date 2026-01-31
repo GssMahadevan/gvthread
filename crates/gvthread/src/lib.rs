@@ -94,7 +94,10 @@ pub use gvthread_core::{
 
 // Re-export kprint macros for debug logging
 pub use gvthread_core::{kprint, kprintln, kerror, kwarn, kinfo, kdebug, ktrace};
-pub use gvthread_core::kprint::{LogLevel, init as init_logging, set_log_level, set_flush_enabled};
+pub use gvthread_core::kprint::{LogLevel, init as init_logging, set_log_level, set_flush_enabled, set_time_enabled};
+
+// Re-export env utilities
+pub use gvthread_core::{env_get, env_get_bool, env_get_opt, env_get_str, env_is_set};
 
 // Re-export runtime types
 pub use gvthread_runtime::{

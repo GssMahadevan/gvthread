@@ -19,6 +19,7 @@
 //! - `spinlock` - Internal spinlock primitive
 //! - `traits` - Platform and architecture traits
 //! - `kprint` - Kernel-style debug printing macros
+//! - `env` - Environment variable utilities
 
 #![allow(dead_code)]
 
@@ -34,6 +35,7 @@ pub mod error;
 pub mod spinlock;
 pub mod traits;
 pub mod kprint;
+pub mod env;
 
 // Re-exports for convenience
 pub use id::GVThreadId;
@@ -46,6 +48,7 @@ pub use mutex::SchedMutex;
 pub use cancel::CancellationToken;
 pub use error::{SchedError, SchedResult};
 pub use spinlock::SpinLock;
+pub use env::{env_get, env_get_bool, env_get_opt, env_get_str, env_is_set};
 
 /// Constants for memory layout
 pub mod constants {

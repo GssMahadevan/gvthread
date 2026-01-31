@@ -4,47 +4,66 @@
 //!
 //! # Environment Variables
 //!
-//! - `GVT_FLUSH_EPRINT=1` - Flush debug output immediately (useful for crash debugging)
-//! - `GVT_LOG_LEVEL=debug` - Set log level (off, error, warn, info, debug, trace)
+//! Configuration:
+//! - `GVT_WORKERS=<n>` - Number of worker threads (default: 4)
+//! - `GVT_LOW_WORKERS=<n>` - Number of low-priority workers (default: 1)
+//! - `GVT_GVTHREADS=<n>` - Number of GVThreads to spawn (default: 3)
+//! - `GVT_YIELDS=<n>` - Number of yields per GVThread (default: 3)
+//!
+//! Logging:
+//! - `GVT_LOG_LEVEL=<level>` - Log level: off, error, warn, info, debug, trace (default: info)
+//! - `GVT_KPRINT_TIME=1` - Include nanosecond timestamps
+//! - `GVT_FLUSH_EPRINT=1` - Flush output immediately (for crash debugging)
+//! - `GVT_DEBUG=1` - Enable scheduler debug logging
 
 use gvthread::{Runtime, spawn, spawn_with_priority, yield_now, Priority, SchedulerConfig};
-use gvthread::{kinfo, kdebug, set_log_level, LogLevel};
+use gvthread::{kinfo, kdebug, env_get, env_get_bool};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-// GVT_LOG_LEVEL=debug GVT_FLUSH_EPRINT=1 cargo run -p gvthread-basic
+
 fn main() {
     println!("=== GVThread Basic Example ===\n");
     
-    // Initialize logging (reads GVT_FLUSH_EPRINT and GVT_LOG_LEVEL env vars)
-    // Or set programmatically:
-    // set_log_level(LogLevel::Debug);
+    // Read configuration from environment
+    let num_workers: usize = env_get("GVT_WORKERS", 4);
+    let num_low_workers: usize = env_get("GVT_LOW_WORKERS", 1);
+    let num_gvthreads: usize = env_get("GVT_GVTHREADS", 3);
+    let num_yields: usize = env_get("GVT_YIELDS", 3);
+    let debug_logging: bool = env_get_bool("GVT_DEBUG", true);
     
-    // Use 4 workers (3 normal + 1 low priority)
+    println!("Configuration:");
+    println!("  Workers: {} (low-priority: {})", num_workers, num_low_workers);
+    println!("  GVThreads: {}, yields per thread: {}", num_gvthreads, num_yields);
+    println!("  Debug logging: {}", debug_logging);
+    println!();
+    
     let config = SchedulerConfig::default()
-        .num_workers(4)
-        .num_low_priority_workers(1)
-        .debug_logging(true);
+        .num_workers(num_workers)
+        .num_low_priority_workers(num_low_workers)
+        .debug_logging(debug_logging);
     
     let mut runtime = Runtime::new(config);
     
     // Counter to track completed GVThreads
+    let total_expected = num_gvthreads + 1; // +1 for HIGH priority
     let completed = Arc::new(AtomicUsize::new(0));
     
     runtime.block_on(|| {
-        kinfo!("Spawning GVThreads...");
+        kinfo!("Spawning {} normal + 1 HIGH priority GVThreads", num_gvthreads);
         
-        // Spawn 3 normal priority GVThreads
-        for i in 1..=3 {
+        // Spawn normal priority GVThreads
+        for i in 1..=num_gvthreads {
             let c = completed.clone();
+            let yields = num_yields;
             let id = spawn(move |_token| {
-                kdebug!("[GVThread {}] Started", i);
+                kdebug!("GVThread {} started", i);
                 
-                for j in 0..3 {
-                    kdebug!("[GVThread {}] Iteration {}", i, j);
+                for j in 0..yields {
+                    kdebug!("GVThread {} iteration {}", i, j);
                     yield_now();
                 }
                 
-                kdebug!("[GVThread {}] Finished", i);
+                kdebug!("GVThread {} finished", i);
                 c.fetch_add(1, Ordering::SeqCst);
             });
             println!("Spawned normal GVThread {} (ID={})", i, id);
@@ -53,19 +72,19 @@ fn main() {
         // Spawn a HIGH priority GVThread
         let c = completed.clone();
         let high_id = spawn_with_priority(move |_token| {
-            kdebug!("[HIGH] Started");
+            kdebug!("HIGH priority started");
             yield_now();
-            kdebug!("[HIGH] Finished");
+            kdebug!("HIGH priority finished");
             c.fetch_add(1, Ordering::SeqCst);
         }, Priority::High);
         println!("Spawned HIGH priority GVThread (ID={})", high_id);
         
         // Wait for all to complete
-        println!("\nWaiting for {} GVThreads to complete...\n", 4);
+        println!("\nWaiting for {} GVThreads to complete...\n", total_expected);
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(10);
         
-        while completed.load(Ordering::SeqCst) < 4 {
+        while completed.load(Ordering::SeqCst) < total_expected {
             if start.elapsed() > timeout {
                 println!("WARNING: Timeout!");
                 break;
@@ -74,7 +93,7 @@ fn main() {
         }
         
         let count = completed.load(Ordering::SeqCst);
-        kinfo!("{} GVThread(s) completed", count);
+        kinfo!("{}/{} GVThread(s) completed", count, total_expected);
     });
     
     println!("\n=== Example Complete ===");
