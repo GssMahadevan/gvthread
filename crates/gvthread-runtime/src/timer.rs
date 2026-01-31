@@ -11,7 +11,6 @@ use crate::scheduler;
 use gvthread_core::id::GVThreadId;
 use gvthread_core::state::Priority;
 use gvthread_core::SpinLock;
-use gvthread_core::{kdebug, kwarn};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -83,19 +82,15 @@ static SLEEP_QUEUE: SpinLock<Option<BinaryHeap<SleepEntry>>> = SpinLock::new(Non
 /// Initialize the sleep queue
 pub fn init_sleep_queue() {
     let mut queue = SLEEP_QUEUE.lock();
-    *queue = Some(BinaryHeap::with_capacity(1024));
+    // Pre-allocate for many sleeping GVThreads to avoid reallocation
+    *queue = Some(BinaryHeap::with_capacity(8192));
 }
 
 /// Add a GVThread to the sleep queue
 fn add_to_sleep_queue(entry: SleepEntry) {
     let mut queue = SLEEP_QUEUE.lock();
     if let Some(ref mut q) = *queue {
-        let len_before = q.len();
         q.push(entry);
-        kdebug!("add_to_sleep_queue: added GVThread {} wake_at={}, queue_len={}->{}",
-               entry.gvthread_id.as_u32(), entry.wake_time_ns, len_before, q.len());
-    } else {
-        kwarn!("add_to_sleep_queue: queue not initialized!");
     }
 }
 
@@ -126,7 +121,6 @@ fn process_sleep_queue() {
         match entry {
             Some(entry) => {
                 // Wake up this GVThread
-                kdebug!("Waking GVThread {} from sleep", entry.gvthread_id.as_u32());
                 scheduler::wake_gvthread(entry.gvthread_id, entry.priority);
             }
             None => break, // No more entries ready
@@ -162,9 +156,6 @@ pub fn sleep(duration: Duration) {
     
     // Calculate wake time
     let wake_time_ns = now_ns() + duration.as_nanos() as u64;
-    
-    kdebug!("GVThread {} sleeping for {:?}, wake at {}", 
-           gvthread_id.as_u32(), duration, wake_time_ns);
     
     // Add to sleep queue
     add_to_sleep_queue(SleepEntry {
