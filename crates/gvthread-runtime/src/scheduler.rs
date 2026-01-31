@@ -463,16 +463,32 @@ fn run_gvthread(worker_id: usize, id: GVThreadId, priority: Priority, debug: boo
 /// The run_gvthread() function adds us back after the context switch completes.
 /// This prevents a race where another worker picks us up before we've saved our context.
 pub fn yield_now() {
+    use std::io::Write;
+    
+    eprintln!("[yield_now] ENTER");
+    let _ = std::io::stderr().flush();
+    
     if !tls::is_in_gvthread() {
-        // Not in a GVThread, just yield OS thread
+        eprintln!("[yield_now] not in gvthread, OS yield");
         std::thread::yield_now();
         return;
     }
     
+    eprintln!("[yield_now] step 1: getting TLS...");
+    let _ = std::io::stderr().flush();
+    
     // Get current GVThread info from TLS
     let gvthread_id = tls::current_gvthread_id();
+    eprintln!("[yield_now] step 2: gvthread_id={}", gvthread_id);
+    let _ = std::io::stderr().flush();
+    
     let meta_base = tls::current_gvthread_base();
+    eprintln!("[yield_now] step 3: meta_base={:p}", meta_base);
+    let _ = std::io::stderr().flush();
+    
     let worker_id = crate::worker::current_worker_id();
+    eprintln!("[yield_now] step 4: worker_id={}", worker_id);
+    let _ = std::io::stderr().flush();
     
     // Safety check
     if meta_base.is_null() || gvthread_id.is_none() {
@@ -481,18 +497,24 @@ pub fn yield_now() {
         return;
     }
     
+    eprintln!("[yield_now] step 5: getting metadata...");
+    let _ = std::io::stderr().flush();
     let meta = unsafe { &*(meta_base as *const GVThreadMetadata) };
     
-    // Mark as Ready - but do NOT add to bitmap yet!
-    // run_gvthread() will add us after context switch returns.
-    // This prevents the race where another worker picks us up
-    // before we've saved our context.
+    eprintln!("[yield_now] step 6: setting state to Ready...");
+    let _ = std::io::stderr().flush();
     meta.set_state(GVThreadState::Ready);
     
-    // Bump activity counter for preemption tracking
-    let worker = current_worker_state();
-    worker.record_activity(crate::timer::now_ns());
+    eprintln!("[yield_now] step 7: getting worker state...");
+    let _ = std::io::stderr().flush();
+    let _worker = current_worker_state();  // Keep to test the call works
     
+    // TEMPORARILY SKIP now_ns() to isolate the issue
+    eprintln!("[yield_now] step 8: SKIPPING record_activity for now");
+    let _ = std::io::stderr().flush();
+
+    eprintln!("[yield_now] step 9: computing register pointers...");
+    let _ = std::io::stderr().flush();
     // Get our saved registers (at offset 0x40 in metadata)
     let gvthread_regs = unsafe {
         (meta_base).add(0x40) as *mut VoluntarySavedRegs
@@ -501,25 +523,26 @@ pub fn yield_now() {
     // Get scheduler context for this worker
     let sched_ctx = get_worker_sched_context(worker_id);
     
-    // DEBUG: Print addresses before context switch
-    eprintln!("[yield_now] gvthread={} worker={} regs_ptr={:p} sched_ptr={:p}",
-              gvthread_id, worker_id, gvthread_regs, sched_ctx);
+    eprintln!("[yield_now] step 10: regs_ptr={:p} sched_ptr={:p}", gvthread_regs, sched_ctx);
+    let _ = std::io::stderr().flush();
     
     // DEBUG: Print current RIP in gvthread_regs BEFORE we save
     let regs_before = unsafe { &*gvthread_regs };
-    eprintln!("[yield_now] BEFORE: rip=0x{:x} rsp=0x{:x}", 
+    eprintln!("[yield_now] BEFORE save: rip=0x{:x} rsp=0x{:x}", 
               regs_before.rip, regs_before.rsp);
+    let _ = std::io::stderr().flush();
+    
+    eprintln!("[yield_now] step 11: calling context_switch_voluntary...");
+    let _ = std::io::stderr().flush();
     
     // Switch back to scheduler
-    // This saves our state to gvthread_regs and restores sched_ctx,
-    // returning control to run_gvthread() right after its context_switch call.
     unsafe {
         current_arch::context_switch_voluntary(gvthread_regs, sched_ctx);
     }
     
     // When we get here, we've been resumed by a worker.
-    // DEBUG: Print that we resumed
     eprintln!("[yield_now] RESUMED on worker={}", crate::worker::current_worker_id());
+    let _ = std::io::stderr().flush();
     
     // Clear preempt flag in case it was set
     meta.clear_preempt();

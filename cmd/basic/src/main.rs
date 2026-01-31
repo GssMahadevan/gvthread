@@ -9,16 +9,16 @@ use std::sync::Arc;
 fn main() {
     println!("=== GVThread Basic Example ===\n");
     
-    // Create runtime with custom config
+    // Use single worker initially to debug context switching
     let config = SchedulerConfig::default()
-        .num_workers(4)
+        .num_workers(1)
+        .num_low_priority_workers(0)
         .debug_logging(true);
     
     let mut runtime = Runtime::new(config);
     
     // Counter to track completed GVThreads
     let completed = Arc::new(AtomicUsize::new(0));
-    let total_gvthreads = 3;
     
     runtime.block_on(|| {
         println!("Spawning GVThreads...\n");
@@ -38,46 +38,24 @@ fn main() {
         });
         println!("Spawned GVThread: {}", id1);
         
-        // Spawn another GVThread
-        let c2 = completed.clone();
-        let id2 = spawn(move |_token| {
-            println!("[GVThread 2] Started!");
-            
-            for i in 0..3 {
-                println!("[GVThread 2] Iteration {}", i);
-                yield_now();
-            }
-            
-            println!("[GVThread 2] Finished!");
-            c2.fetch_add(1, Ordering::SeqCst);
-        });
-        println!("Spawned GVThread: {}", id2);
-        
-        // Spawn a high-priority GVThread
-        let c3 = completed.clone();
-        let id3 = gvthread::spawn_with_priority(move |_token| {
-            println!("[GVThread 3 - HIGH] Started!");
-            println!("[GVThread 3 - HIGH] Finished!");
-            c3.fetch_add(1, Ordering::SeqCst);
-        }, Priority::High);
-        println!("Spawned HIGH priority GVThread: {}", id3);
-        
-        // Wait for all GVThreads to complete (with timeout)
-        println!("\nWaiting for GVThreads to complete...");
+        // Wait for first one to complete before spawning more
+        println!("\nWaiting for GVThread 1 to complete...");
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(5);
         
-        while completed.load(Ordering::SeqCst) < total_gvthreads {
+        while completed.load(Ordering::SeqCst) < 1 {
             if start.elapsed() > timeout {
-                println!("WARNING: Timeout waiting for GVThreads!");
+                println!("WARNING: Timeout waiting for GVThread 1!");
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
         
         let count = completed.load(Ordering::SeqCst);
-        println!("\n{}/{} GVThreads completed!", count, total_gvthreads);
+        println!("\n{} GVThread(s) completed!", count);
     });
-    
+    std::thread::sleep(std::time::Duration::from_secs(10));
+
     println!("\n=== Example Complete ===");
+    
 }
