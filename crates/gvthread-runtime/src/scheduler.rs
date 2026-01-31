@@ -8,6 +8,7 @@ use crate::worker::{WorkerPool, set_current_worker_id, current_worker_state, wor
 use crate::timer::TimerThread;
 use crate::tls;
 use crate::current_arch;
+use crate::parking::{WorkerParking, new_parking};
 
 use gvthread_core::id::GVThreadId;
 use gvthread_core::state::{GVThreadState, Priority};
@@ -23,6 +24,7 @@ use gvthread_core::error::{SchedError, SchedResult};
 use gvthread_core::{kprintln, kdebug, kwarn};
 
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::OnceLock;
 use std::ptr;
 
 
@@ -30,6 +32,14 @@ use std::ptr;
 static mut SCHEDULER: Option<Scheduler> = None;
 static SCHEDULER_INIT: AtomicBool = AtomicBool::new(false);
 static SCHEDULER_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Global worker parking (futex-based on Linux)
+static WORKER_PARKING: OnceLock<Box<dyn WorkerParking>> = OnceLock::new();
+
+/// Get the global parking instance
+fn parking() -> &'static dyn WorkerParking {
+    WORKER_PARKING.get().expect("Parking not initialized").as_ref()
+}
 
 /// Per-worker scheduler context
 /// 
@@ -279,6 +289,9 @@ impl Scheduler {
         // Clear the global running flag FIRST to signal workers to exit
         SCHEDULER_RUNNING.store(false, Ordering::Release);
         
+        // Wake all parked workers so they can see the shutdown flag
+        parking().wake_all();
+        
         // Give workers a moment to notice the flag
         std::thread::sleep(std::time::Duration::from_millis(10));
         
@@ -330,6 +343,14 @@ fn worker_main_loop(worker_id: usize, is_low_priority: bool, debug: bool) {
         kdebug!("Started (low_priority={})", is_low_priority);
     }
     
+    // Idle configuration from environment
+    use gvthread_core::env::env_get;
+    let spin_limit: u32 = env_get("GVT_IDLE_SPINS", 10);
+    let park_timeout_ms: u64 = env_get("GVT_PARK_TIMEOUT_MS", 100); // Default 100ms
+    
+    // Idle state
+    let mut idle_spins: u32 = 0;
+    
     // Main loop
     loop {
         // Check for shutdown
@@ -351,15 +372,27 @@ fn worker_main_loop(worker_id: usize, is_low_priority: bool, debug: bool) {
         
         match next {
             Some((id, priority)) => {
-                // Run the GVThread
+                // Got work - reset idle state
+                idle_spins = 0;
                 worker.is_parked.store(false, Ordering::Relaxed);
                 run_gvthread(worker_id, id, priority, debug);
             }
             None => {
-                // No work available, park
-                worker.is_parked.store(true, Ordering::Relaxed);
-                std::thread::yield_now();
-                std::hint::spin_loop();
+                // No work available
+                if idle_spins < spin_limit {
+                    // Quick spin first (catch fast ready→run cycles)
+                    idle_spins += 1;
+                    for _ in 0..32 {
+                        std::hint::spin_loop();
+                    }
+                    std::thread::yield_now();
+                } else {
+                    // Park on futex with timeout
+                    worker.is_parked.store(true, Ordering::Relaxed);
+                    parking().park(Some(std::time::Duration::from_millis(park_timeout_ms)));
+                    worker.is_parked.store(false, Ordering::Relaxed);
+                    idle_spins = 0; // Reset after park
+                }
             }
         }
     }
@@ -570,6 +603,8 @@ pub fn wake_gvthread(id: GVThreadId, priority: Priority) {
     unsafe {
         if let Some(ref sched) = SCHEDULER {
             sched.wake_gvthread(id, priority);
+            // Wake a parked worker to pick up the newly ready GVThread
+            parking().wake_one();
         }
     }
 }
@@ -579,11 +614,16 @@ pub fn spawn<F>(f: F, priority: Priority) -> GVThreadId
 where
     F: FnOnce(&CancellationToken) + Send + 'static,
 {
-    unsafe {
+    let id = unsafe {
         SCHEDULER.as_ref()
             .expect("Scheduler not initialized")
             .spawn(f, priority)
-    }
+    };
+    
+    // Wake a parked worker to pick up the new work
+    parking().wake_one();
+    
+    id
 }
 
 /// Initialize the global scheduler
@@ -591,6 +631,9 @@ pub fn init_global_scheduler(config: SchedulerConfig) -> SchedResult<()> {
     if SCHEDULER_INIT.swap(true, Ordering::SeqCst) {
         return Err(SchedError::AlreadyInitialized);
     }
+    
+    // Initialize worker parking
+    let _ = WORKER_PARKING.set(new_parking());
     
     // Initialize the sleep queue with capacity for all possible GVThreads
     crate::timer::init_sleep_queue_with_capacity(config.max_gvthreads);

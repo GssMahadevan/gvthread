@@ -22,12 +22,14 @@ pub mod worker;
 pub mod timer;
 pub mod scheduler;
 pub mod tls;
+pub mod parking;
 
 // Re-exports
 pub use config::SchedulerConfig;
 pub use scheduler::Scheduler;
 pub use worker::{WorkerPool, worker_states};
 pub use timer::{sleep, sleep_ms, sleep_us};
+pub use parking::{WorkerParking, new_parking};
 
 // Platform detection
 cfg_if::cfg_if! {

@@ -7,6 +7,8 @@
 //! - `GVT_GVTHREADS=<n>` - Number of GVThreads (default: 10)
 //! - `GVT_YIELDS=<n>` - Yields per GVThread (default: 5)
 //! - `GVT_SLEEP_MS=<n>` - Sleep time in ms (0 = no sleep, default: 0)
+//! - `GVT_PARK_TIMEOUT_MS=<n>` - Worker park timeout in ms (default: 100)
+//! - `GVT_IDLE_SPINS=<n>` - Spin iterations before parking (default: 10)
 //! - `GVT_DEBUG=1` - Enable debug logging
 //! - `GVT_LOG_LEVEL=debug` - Set log level
 //! - `GVT_KPRINT_TIME=1` - Show timestamps
@@ -25,6 +27,7 @@ fn main() {
     let total_gvthreads: usize = env_get("GVT_GVTHREADS", 10);
     let yields_per_gvthread: usize = env_get("GVT_YIELDS", 5);
     let sleep_time_ms: u64 = env_get("GVT_SLEEP_MS", 0);
+    let park_timeout_ms: u64 = env_get("GVT_PARK_TIMEOUT_MS", 100);
     let debug_logging: bool = env_get_bool("GVT_DEBUG", false);
     
     println!("Configuration:");
@@ -33,6 +36,7 @@ fn main() {
     if sleep_time_ms > 0 {
         println!("  Sleep per yield: {}ms (cooperative)", sleep_time_ms);
     }
+    println!("  Worker park timeout: {}ms (futex)", park_timeout_ms);
     println!("  Debug: {}", debug_logging);
     println!();
     
