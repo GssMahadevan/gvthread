@@ -27,7 +27,8 @@ impl SlotAllocator {
     /// Create a new slot allocator
     pub fn new(max_slots: usize) -> Self {
         Self {
-            free_stack: SpinLock::new(Vec::with_capacity(1024)),
+            // Pre-allocate to max capacity to avoid reallocation from GVThread stack
+            free_stack: SpinLock::new(Vec::with_capacity(max_slots)),
             next_fresh: AtomicU32::new(0),
             max_slots: max_slots as u32,
             allocated_count: AtomicU32::new(0),

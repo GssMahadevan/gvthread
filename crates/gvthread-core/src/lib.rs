@@ -52,8 +52,15 @@ pub use env::{env_get, env_get_bool, env_get_opt, env_get_str, env_is_set};
 
 /// Constants for memory layout
 pub mod constants {
-    /// Size of each GVThread slot (16 MB)
-    pub const SLOT_SIZE: usize = 16 * 1024 * 1024;
+    /// Slot size - configurable via feature flag
+    /// Default: 16KB (4 pages) for debugging, gives ~8KB usable stack
+    /// For production: rebuild with larger size or use GVT_SLOT_PAGES env
+    /// cargo build --features large-stack -p gvthread-playground
+    #[cfg(feature = "large-stack")]
+    pub const SLOT_SIZE: usize = 16 * 1024 * 1024;  // 16 MB
+    
+    #[cfg(not(feature = "large-stack"))]
+    pub const SLOT_SIZE: usize = 16 * 1024;  // 16 KB (4 pages)
     
     /// Guard page size (4 KB)
     pub const GUARD_SIZE: usize = 4096;
@@ -61,7 +68,7 @@ pub mod constants {
     /// Metadata size at start of slot (4 KB, one page)
     pub const METADATA_SIZE: usize = 4096;
     
-    /// Stack size within slot (16MB - metadata - guard)
+    /// Stack size within slot (slot - metadata - guard)
     pub const STACK_SIZE: usize = SLOT_SIZE - METADATA_SIZE - GUARD_SIZE;
     
     /// Maximum workers (OS threads)

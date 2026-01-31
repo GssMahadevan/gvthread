@@ -52,6 +52,7 @@ struct SleepEntry {
     wake_time_ns: u64,
     gvthread_id: GVThreadId,
     priority: Priority,
+    generation: u32,  // To detect stale wakes after slot reuse
 }
 
 // Ordering for min-heap (smallest wake_time first)
@@ -125,8 +126,12 @@ fn process_sleep_queue() {
         
         match entry {
             Some(entry) => {
-                // Wake up this GVThread
-                scheduler::wake_gvthread(entry.gvthread_id, entry.priority);
+                // Wake up this GVThread (with generation check)
+                scheduler::wake_gvthread_checked(
+                    entry.gvthread_id, 
+                    entry.priority,
+                    entry.generation,
+                );
             }
             None => break, // No more entries ready
         }
@@ -155,18 +160,20 @@ pub fn sleep(duration: Duration) {
         return;
     }
     
-    // Get priority from metadata
+    // Get priority and generation from metadata
     let meta = unsafe { &*(meta_base as *const gvthread_core::GVThreadMetadata) };
     let priority = meta.get_priority();
+    let generation = meta.get_generation();
     
     // Calculate wake time
     let wake_time_ns = now_ns() + duration.as_nanos() as u64;
     
-    // Add to sleep queue
+    // Add to sleep queue with generation for stale wake detection
     add_to_sleep_queue(SleepEntry {
         wake_time_ns,
         gvthread_id,
         priority,
+        generation,
     });
     
     // Mark as blocked and yield

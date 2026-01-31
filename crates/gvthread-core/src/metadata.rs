@@ -31,7 +31,8 @@ pub const FORCED_SAVE_SIZE: usize = 256;
 /// 0x10: entry_fn        (u64) - Entry function pointer
 /// 0x18: entry_arg       (u64) - Entry function argument
 /// 0x20: result_ptr      (u64) - Pointer to result storage
-/// 0x28: reserved        (24 bytes)
+/// 0x28: generation      (u32) - Generation counter for slot reuse detection
+/// 0x2C: reserved        (20 bytes)
 /// 0x40: voluntary_regs  (64 bytes)  - Callee-saved registers
 /// 0x80: forced_regs     (256 bytes) - All registers (SIGURG)
 /// ```
@@ -53,8 +54,11 @@ pub struct GVThreadMetadata {
     pub entry_arg: AtomicU64,
     pub result_ptr: AtomicU64,
     
-    // Reserved for future use (offset 0x28-0x3F)
-    _reserved: [u8; 24],
+    // Generation counter for slot reuse detection (offset 0x28-0x2B)
+    pub generation: AtomicU32,
+    
+    // Reserved for future use (offset 0x2C-0x3F)
+    _reserved: [u8; 20],
     
     // Saved registers for voluntary yield (offset 0x40-0x7F)
     // rsp, rip, rbx, rbp, r12, r13, r14, r15
@@ -159,7 +163,8 @@ impl GVThreadMetadata {
             entry_fn: AtomicU64::new(0),
             entry_arg: AtomicU64::new(0),
             result_ptr: AtomicU64::new(0),
-            _reserved: [0; 24],
+            generation: AtomicU32::new(0),
+            _reserved: [0; 20],
             voluntary_regs: VoluntarySavedRegs {
                 rsp: 0, rip: 0, rbx: 0, rbp: 0,
                 r12: 0, r13: 0, r14: 0, r15: 0,
@@ -185,6 +190,8 @@ impl GVThreadMetadata {
         self.gvthread_id.store(id.as_u32(), Ordering::Relaxed);
         self.parent_id.store(parent.as_u32(), Ordering::Relaxed);
         self.worker_id.store(GVTHREAD_NONE, Ordering::Relaxed);
+        // Increment generation on each reuse for stale wake detection
+        self.generation.fetch_add(1, Ordering::Relaxed);
     }
     
     // Accessor methods
@@ -232,6 +239,11 @@ impl GVThreadMetadata {
     #[inline]
     pub fn get_id(&self) -> GVThreadId {
         GVThreadId::new(self.gvthread_id.load(Ordering::Relaxed))
+    }
+    
+    #[inline]
+    pub fn get_generation(&self) -> u32 {
+        self.generation.load(Ordering::Acquire)
     }
 }
 

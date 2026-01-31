@@ -609,6 +609,23 @@ pub fn wake_gvthread(id: GVThreadId, priority: Priority) {
     }
 }
 
+/// Wake a blocked GVThread with generation check
+/// 
+/// Only wakes if the current generation matches. This prevents stale
+/// wakes after a slot has been reused for a new GVThread.
+pub fn wake_gvthread_checked(id: GVThreadId, priority: Priority, expected_generation: u32) {
+    let meta_ptr = memory::get_metadata_ptr(id.as_u32());
+    let meta = unsafe { &*meta_ptr };
+    
+    // Check generation to avoid waking wrong GVThread after slot reuse
+    if meta.get_generation() != expected_generation {
+        return; // Stale wake - slot was reused
+    }
+    
+    // Delegate to normal wake
+    wake_gvthread(id, priority);
+}
+
 /// Spawn a new GVThread (uses global scheduler)
 pub fn spawn<F>(f: F, priority: Priority) -> GVThreadId
 where

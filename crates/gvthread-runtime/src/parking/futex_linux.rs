@@ -2,19 +2,10 @@
 //!
 //! Uses the futex syscall for efficient sleep/wake with minimal overhead.
 //! 
-//! Futex word semantics:
-//! - 0 = no wake pending
-//! - 1 = wake pending (workers should check for work)
-//!
-//! When a worker parks:
-//! 1. Increment parked count
-//! 2. FUTEX_WAIT on futex word (blocks if word == 0)
-//! 3. Decrement parked count on return
-//!
-//! When waking:
-//! 1. Set futex word to 1
-//! 2. FUTEX_WAKE to wake N waiters
-//! 3. Reset futex word to 0
+//! Design: Simple counter-based approach
+//! - futex word represents "pending wakes" count
+//! - wake_one() increments and wakes
+//! - park() decrements (if > 0) or waits
 
 use super::WorkerParking;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
@@ -22,7 +13,7 @@ use std::time::Duration;
 
 /// Linux futex-based parking
 pub struct FutexParking {
-    /// Futex word: 0 = sleep, 1 = wake pending
+    /// Futex word: count of pending wakes
     futex: AtomicU32,
     
     /// Count of parked workers (for optimization)
@@ -47,17 +38,27 @@ impl Default for FutexParking {
 
 impl WorkerParking for FutexParking {
     fn park(&self, timeout: Option<Duration>) -> bool {
-        // Increment parked count
-        self.parked.fetch_add(1, Ordering::SeqCst);
-        
-        // Check if wake is already pending
-        if self.futex.load(Ordering::Acquire) != 0 {
-            // Wake pending, don't sleep
-            self.parked.fetch_sub(1, Ordering::SeqCst);
-            // Reset the wake flag (we consumed it)
-            self.futex.store(0, Ordering::Release);
-            return true;
+        // Try to consume a pending wake first (fast path)
+        loop {
+            let current = self.futex.load(Ordering::Acquire);
+            if current > 0 {
+                // Try to consume a wake
+                if self.futex.compare_exchange_weak(
+                    current,
+                    current - 1,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ).is_ok() {
+                    return true; // Consumed a pending wake
+                }
+                // CAS failed, retry
+                continue;
+            }
+            break;
         }
+        
+        // No pending wakes, need to actually wait
+        self.parked.fetch_add(1, Ordering::SeqCst);
         
         // Prepare timeout
         let timespec = timeout.map(|d| libc::timespec {
@@ -83,53 +84,61 @@ impl WorkerParking for FutexParking {
             )
         };
         
-        // Decrement parked count
         self.parked.fetch_sub(1, Ordering::SeqCst);
         
-        // Result: 0 = woken, -1 = error (timeout or spurious)
-        if result == 0 {
-            true // Woken by FUTEX_WAKE
-        } else {
-            let errno = unsafe { *libc::__errno_location() };
-            // ETIMEDOUT = timeout, EAGAIN = value changed (spurious), EINTR = signal
-            // All are "not woken by wake_one/wake_all"
-            errno != libc::ETIMEDOUT && errno != libc::EAGAIN && errno != libc::EINTR
+        // If futex value changed (EAGAIN), try to consume the wake
+        if result != 0 {
+            // Try to consume any pending wake
+            loop {
+                let current = self.futex.load(Ordering::Acquire);
+                if current > 0 {
+                    if self.futex.compare_exchange_weak(
+                        current,
+                        current - 1,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ).is_ok() {
+                        return true;
+                    }
+                    continue;
+                }
+                break;
+            }
         }
+        
+        result == 0
     }
     
     fn wake_one(&self) {
-        // Check if any workers are parked
-        if self.parked.load(Ordering::Acquire) == 0 {
-            return; // No one to wake
-        }
+        // Increment pending wakes
+        self.futex.fetch_add(1, Ordering::Release);
         
-        // Set wake flag
-        self.futex.store(1, Ordering::Release);
-        
-        // FUTEX_WAKE: wake 1 waiter
-        unsafe {
-            libc::syscall(
-                libc::SYS_futex,
-                self.futex.as_ptr(),
-                libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
-                1i32,           // Wake at most 1 waiter
-                std::ptr::null::<libc::timespec>(),
-                std::ptr::null::<u32>(),
-                0u32,
-            );
+        // Wake one waiter if any are parked
+        if self.parked.load(Ordering::Acquire) > 0 {
+            unsafe {
+                libc::syscall(
+                    libc::SYS_futex,
+                    self.futex.as_ptr(),
+                    libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
+                    1i32,           // Wake at most 1 waiter
+                    std::ptr::null::<libc::timespec>(),
+                    std::ptr::null::<u32>(),
+                    0u32,
+                );
+            }
         }
     }
     
     fn wake_all(&self) {
-        // Check if any workers are parked
-        if self.parked.load(Ordering::Acquire) == 0 {
-            return; // No one to wake
+        // Increment pending wakes by a large amount
+        let parked = self.parked.load(Ordering::Acquire);
+        if parked == 0 {
+            return;
         }
         
-        // Set wake flag
-        self.futex.store(1, Ordering::Release);
+        self.futex.fetch_add(parked as u32 + 1, Ordering::Release);
         
-        // FUTEX_WAKE: wake all waiters
+        // Wake all waiters
         unsafe {
             libc::syscall(
                 libc::SYS_futex,
