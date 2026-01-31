@@ -77,10 +77,14 @@ fn init_pending_sleeps(capacity: usize) {
 
 /// Notify timer thread that a GVThread wants to sleep
 /// Called from GVThread stack - must be lock-free!
+/// 
+/// IMPORTANT: There's a race between fetch_add and store. The timer thread
+/// spin-waits briefly if it sees value=0 to handle this case.
 fn notify_pending_sleep(gvthread_id: u32, generation: u32) {
     let ring = PENDING_SLEEPS.get().expect("Pending sleeps not initialized");
     
     // Claim a slot atomically
+    // NOTE: Between fetch_add and store below, timer might try to read this slot
     let pos = ring.write_pos.fetch_add(1, Ordering::AcqRel) % ring.slots.len();
     
     // Write the notification (GVThread ID + generation for validation)
@@ -102,32 +106,48 @@ fn drain_pending_sleeps() {
     // Process all pending notifications
     while read_pos != write_pos {
         let pos = read_pos % ring.slots.len();
-        let value = ring.slots[pos].swap(0, Ordering::AcqRel);
         
-        if value != 0 {
-            let gvthread_id = (value >> 32) as u32;
-            let generation = value as u32;
+        // CRITICAL: Writer does fetch_add THEN store. We might read before store completes.
+        // Spin-wait briefly for the value to be written.
+        let mut value = ring.slots[pos].load(Ordering::Acquire);
+        let mut spins = 0;
+        while value == 0 && spins < 1000 {
+            std::hint::spin_loop();
+            value = ring.slots[pos].load(Ordering::Acquire);
+            spins += 1;
+        }
+        
+        if value == 0 {
+            // Writer is very slow - stop here and retry next timer tick
+            // Don't update read_pos so we'll retry this slot
+            break;
+        }
+        
+        // Clear the slot
+        ring.slots[pos].store(0, Ordering::Release);
+        
+        let gvthread_id = (value >> 32) as u32;
+        let generation = value as u32;
+        
+        // Get wake_time from metadata
+        let meta_ptr = crate::memory::get_metadata_ptr(gvthread_id);
+        let meta = unsafe { &*meta_ptr };
+        
+        // Verify generation matches (slot wasn't reused)
+        if meta.generation.load(Ordering::Acquire) == generation {
+            let wake_time = meta.wake_time_ns.load(Ordering::Acquire);
+            let priority = meta.get_priority();
             
-            // Get wake_time from metadata
-            let meta_ptr = crate::memory::get_metadata_ptr(gvthread_id);
-            let meta = unsafe { &*meta_ptr };
+            // Clear sleep flag
+            meta.sleep_flag.store(0, Ordering::Release);
             
-            // Verify generation matches (slot wasn't reused)
-            if meta.generation.load(Ordering::Acquire) == generation {
-                let wake_time = meta.wake_time_ns.load(Ordering::Acquire);
-                let priority = meta.get_priority();
-                
-                // Clear sleep flag
-                meta.sleep_flag.store(0, Ordering::Release);
-                
-                // Add to actual sleep queue (now on timer thread stack - safe!)
-                add_to_sleep_queue(SleepEntry {
-                    wake_time_ns: wake_time,
-                    gvthread_id: GVThreadId::new(gvthread_id),
-                    priority,
-                    generation,
-                });
-            }
+            // Add to actual sleep queue (now on timer thread stack - safe!)
+            add_to_sleep_queue(SleepEntry {
+                wake_time_ns: wake_time,
+                gvthread_id: GVThreadId::new(gvthread_id),
+                priority,
+                generation,
+            });
         }
         
         read_pos += 1;
