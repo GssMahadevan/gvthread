@@ -207,17 +207,19 @@ pub fn get_gvthread_id() -> Option<u32> {
     GVTHREAD_ID.with(|g| g.get())
 }
 
-/// Format context string [w<id>:g<id>]
-fn format_context() -> String {
-    let worker = match get_worker_id() {
-        Some(id) => format!("w{}", id),
-        None => "w--".to_string(),
-    };
-    let gvthread = match get_gvthread_id() {
-        Some(id) => format!("g{}", id),
-        None => "g--".to_string(),
-    };
-    format!("[{}:{}]", worker, gvthread)
+/// Write context string [w<id>:g<id>] directly to handle (no heap allocation)
+fn write_context(handle: &mut std::io::StderrLock<'_>) -> std::io::Result<()> {
+    let _ = handle.write_all(b"[w");
+    match get_worker_id() {
+        Some(id) => { let _ = write!(handle, "{}", id); }
+        None => { let _ = handle.write_all(b"--"); }
+    }
+    let _ = handle.write_all(b":g");
+    match get_gvthread_id() {
+        Some(id) => { let _ = write!(handle, "{}", id); }
+        None => { let _ = handle.write_all(b"--"); }
+    }
+    handle.write_all(b"] ")
 }
 
 /// Internal: Write and optionally flush (no context)
@@ -261,8 +263,8 @@ pub fn _klog_impl(level: LogLevel, args: std::fmt::Arguments<'_>) {
         let _ = write!(handle, "[{}] ", elapsed_ns());
     }
     
-    // Context [worker:gvthread]
-    let _ = write!(handle, "{} ", format_context());
+    // Context [worker:gvthread] - written directly, no heap allocation
+    let _ = write_context(&mut handle);
     
     // User message
     let _ = handle.write_fmt(args);
