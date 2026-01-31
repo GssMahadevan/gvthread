@@ -18,6 +18,7 @@
 //! - `error` - Error types
 //! - `spinlock` - Internal spinlock primitive
 //! - `traits` - Platform and architecture traits
+//! - `kprint` - Kernel-style debug printing macros
 
 #![allow(dead_code)]
 
@@ -32,6 +33,7 @@ pub mod cancel;
 pub mod error;
 pub mod spinlock;
 pub mod traits;
+pub mod kprint;
 
 // Re-exports for convenience
 pub use id::GVThreadId;

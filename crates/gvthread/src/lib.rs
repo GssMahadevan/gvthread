@@ -92,6 +92,10 @@ pub use gvthread_core::{
     SchedMutex,
 };
 
+// Re-export kprint macros for debug logging
+pub use gvthread_core::{kprint, kprintln, kerror, kwarn, kinfo, kdebug, ktrace};
+pub use gvthread_core::kprint::{LogLevel, init as init_logging, set_log_level, set_flush_enabled};
+
 // Re-export runtime types
 pub use gvthread_runtime::{
     SchedulerConfig,

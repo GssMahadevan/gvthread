@@ -1,81 +1,70 @@
 //! Minimal context switch test
 //!
-//! Tests context switching directly without the full scheduler.
+//! Tests context switching with multiple workers.
 
 use gvthread::{Runtime, spawn, yield_now, SchedulerConfig};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-
+// GVT_LOG_LEVEL=debug GVT_FLUSH_EPRINT=1 cargo run -p gvthread-basic
 fn main() {
-    println!("=== Minimal Context Switch Test ===\n");
+    println!("=== Context Switch Test (Multi-Worker) ===\n");
     
-    // Use single worker to eliminate race conditions
+    // Test with 4 workers
     let config = SchedulerConfig::default()
-        .num_workers(1)
-        .num_low_priority_workers(0)
+        .num_workers(4)
+        .num_low_priority_workers(1)
         .debug_logging(true);
     
     let mut runtime = Runtime::new(config);
     
     runtime.block_on(|| {
-        // Counter to detect if closure restarts
-        let entry_count = Arc::new(AtomicUsize::new(0));
-        let yield_count = Arc::new(AtomicUsize::new(0));
+        let total_gvthreads = 10;
+        let yields_per_gvthread = 5;
         
-        let ec = entry_count.clone();
-        let yc = yield_count.clone();
+        let completed = Arc::new(AtomicUsize::new(0));
+        let total_yields = Arc::new(AtomicUsize::new(0));
         
-        println!("Spawning test GVThread...");
+        println!("Spawning {} GVThreads, each yielding {} times...\n", 
+                 total_gvthreads, yields_per_gvthread);
         
-        spawn(move |_token| {
-            // Track closure entry
-            let entries = ec.fetch_add(1, Ordering::SeqCst) + 1;
-            println!("==> CLOSURE ENTERED (entry #{})", entries);
+        for i in 0..total_gvthreads {
+            let c = completed.clone();
+            let ty = total_yields.clone();
             
-            if entries > 1 {
-                println!("!!! ERROR: Closure entered {} times - context not saved properly!", entries);
-                return;
-            }
-            
-            // Do 3 yields
-            for i in 1..=3 {
-                println!("  Before yield #{}", i);
-                yield_now();
-                let yields = yc.fetch_add(1, Ordering::SeqCst) + 1;
-                println!("  After yield #{} (total yields: {})", i, yields);
-            }
-            
-            println!("==> CLOSURE FINISHED");
-        });
-        
-        // Wait for completion
-        println!("\nWaiting for test to complete...");
-        for i in 0..50 {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            
-            let entries = entry_count.load(Ordering::SeqCst);
-            let yields = yield_count.load(Ordering::SeqCst);
-            
-            if entries > 1 {
-                println!("\n!!! FAILURE: Multiple closure entries detected!");
-                break;
-            }
-            
-            if yields >= 3 {
-                println!("\n*** SUCCESS: All 3 yields completed! ***");
-                break;
-            }
-            
-            if i % 10 == 9 {
-                println!("  (waiting... entries={}, yields={})", entries, yields);
-            }
+            spawn(move |_token| {
+                for j in 0..yields_per_gvthread {
+                    ty.fetch_add(1, Ordering::SeqCst);
+                    yield_now();
+                }
+                c.fetch_add(1, Ordering::SeqCst);
+            });
         }
         
-        println!("\nFinal: entry_count={}, yield_count={}", 
-                 entry_count.load(Ordering::SeqCst),
-                 yield_count.load(Ordering::SeqCst));
+        // Wait for completion
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(10);
+        
+        while completed.load(Ordering::SeqCst) < total_gvthreads {
+            if start.elapsed() > timeout {
+                println!("TIMEOUT!");
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        
+        let c = completed.load(Ordering::SeqCst);
+        let y = total_yields.load(Ordering::SeqCst);
+        
+        println!("\n=== Results ===");
+        println!("Completed: {}/{}", c, total_gvthreads);
+        println!("Total yields: {} (expected: {})", y, total_gvthreads * yields_per_gvthread);
+        
+        if c == total_gvthreads && y == total_gvthreads * yields_per_gvthread {
+            println!("\n*** SUCCESS ***");
+        } else {
+            println!("\n*** FAILURE ***");
+        }
     });
-    std::thread::sleep(std::time::Duration::from_secs(10));
-
-    println!("\n=== Test Complete ===");
+    
+    println!("\n=== Done ===");
 }

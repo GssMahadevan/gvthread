@@ -183,14 +183,18 @@ fn handle_stuck_gvthread(
 }
 
 /// Get current time in nanoseconds
+/// 
+/// Uses Instant for monotonic time - more reliable than SystemTime
+/// and works better on custom stacks.
 #[inline]
 pub fn now_ns() -> u64 {
-    // Using std::time for now, could use RDTSC for lower overhead
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as u64
+    use std::time::Instant;
+    
+    // Use a static start time to convert Instant to nanoseconds
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let start = START.get_or_init(Instant::now);
+    
+    start.elapsed().as_nanos() as u64
 }
 
 /// Coarse timestamp (updated periodically for low-overhead access)
