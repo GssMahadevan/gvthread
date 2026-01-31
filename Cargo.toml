@@ -1,0 +1,59 @@
+[workspace]
+resolver = "2"
+
+members = [
+    # Core crates
+    "crates/gvthread-core",
+    "crates/gvthread-runtime",
+    "crates/gvthread",
+    
+    # Optional/future crates (uncomment when ready)
+    # "crates/gvthread-ipc",
+    
+    # Command-line tools and examples (Go-style cmd/)
+    "cmd/basic",
+    "cmd/channel",
+    "cmd/preemption",
+    "cmd/stress",
+    "cmd/benchmark",
+    "cmd/playground",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["GssMahadevan"]
+license = "MIT"
+repository = "https://github.com/gssmahadevan/gvthread"
+keywords = ["async", "threading", "scheduler", "green-threads", "concurrency"]
+categories = ["concurrency", "asynchronous"]
+rust-version = "1.79"  # Required for naked_asm! (stabilized in 1.79)
+
+[workspace.dependencies]
+# Internal crates
+gvthread-core = { path = "crates/gvthread-core" }
+gvthread-runtime = { path = "crates/gvthread-runtime" }
+gvthread = { path = "crates/gvthread" }
+
+# External dependencies (shared versions)
+libc = "0.2"
+nix = { version = "0.27", features = ["signal", "pthread", "mman"] }
+cfg-if = "1.0"
+
+# Build dependencies
+cc = "1.0"
+
+# Dev/test dependencies
+criterion = "0.5"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[profile.dev]
+opt-level = 1
+
+[profile.bench]
+opt-level = 3
+debug = false

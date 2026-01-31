@@ -1,0 +1,12 @@
+[package]
+name = "gvthread-preemption"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "preemption"
+path = "src/main.rs"
+
+[dependencies]
+gvthread.workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "gvthread"
+description = "Green Virtual Thread scheduler for Rust - High-performance userspace threading"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+gvthread-core.workspace = true
+gvthread-runtime.workspace = true
+
+[features]
+default = []
+ipc = []  # Future: gvthread-ipc
+io-uring = ["gvthread-runtime/io-uring"]
+debug-logging = ["gvthread-runtime/debug-logging"]

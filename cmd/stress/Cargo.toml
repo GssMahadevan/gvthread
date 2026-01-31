@@ -1,0 +1,12 @@
+[package]
+name = "gvthread-stress"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "stress"
+path = "src/main.rs"
+
+[dependencies]
+gvthread.workspace = true

@@ -1,0 +1,88 @@
+# Rust / Cargo
+/target/
+**/target/
+Cargo.lock
+**/*.rs.bk
+*.pdb
+
+# Build artifacts
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# OS generated
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Debug
+*.dSYM/
+*.su
+*.idb
+
+# Profiling
+perf.data
+perf.data.old
+flamegraph.svg
+cachegrind.out.*
+callgrind.out.*
+
+# Testing artifacts
+*.profraw
+*.profdata
+coverage/
+lcov.info
+
+# Documentation build
+/doc/
+/docs/api/
+
+# Local configuration
+.env
+.env.local
+*.local
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Core dumps
+core
+core.*
+vgcore.*
+
+# Backup files
+*.bak
+*.backup
+*.orig
+
+# Archive files (don't commit these)
+*.zip
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.7z

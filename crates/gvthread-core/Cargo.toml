@@ -1,0 +1,18 @@
+[package]
+name = "gvthread-core"
+description = "Core types and traits for GVThread scheduler - platform agnostic"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cfg-if.workspace = true
+
+[features]
+default = []
+debug-assertions = []

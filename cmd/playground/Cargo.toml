@@ -1,0 +1,12 @@
+[package]
+name = "gvthread-playground"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "playground"
+path = "src/main.rs"
+
+[dependencies]
+gvthread.workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "gvthread-channel"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "channel"
+path = "src/main.rs"
+
+[dependencies]
+gvthread.workspace = true

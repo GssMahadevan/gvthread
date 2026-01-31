@@ -1,0 +1,12 @@
+[package]
+name = "gvthread-basic"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "basic"
+path = "src/main.rs"
+
+[dependencies]
+gvthread.workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "gvthread-benchmark"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "benchmark"
+path = "src/main.rs"
+
+[dependencies]
+gvthread.workspace = true
