@@ -54,7 +54,7 @@ fn main() {
         
         let mut spawn_ids: Vec<GVThreadId> = Vec::with_capacity(total_gvthreads);
         
-        for _i in 0..total_gvthreads {
+        for i in 0..total_gvthreads {
             let st = started.clone();
             let c = completed.clone();
             let ty = total_yields.clone();
@@ -77,6 +77,11 @@ fn main() {
             
             spawn_ids.push(id);
             spawned.fetch_add(1, Ordering::SeqCst);
+            
+            // Progress during spawn
+            if (i + 1) % 1000 == 0 {
+                eprintln!("[SPAWN] {}/{}", i + 1, total_gvthreads);
+            }
         }
         
         let spawned_count = spawned.load(Ordering::SeqCst);
