@@ -32,7 +32,9 @@ pub const FORCED_SAVE_SIZE: usize = 256;
 /// 0x18: entry_arg       (u64) - Entry function argument
 /// 0x20: result_ptr      (u64) - Pointer to result storage
 /// 0x28: generation      (u32) - Generation counter for slot reuse detection
-/// 0x2C: reserved        (20 bytes)
+/// 0x2C: sleep_flag      (u32) - Non-zero if sleeping (needs timer processing)
+/// 0x30: wake_time_ns    (u64) - Absolute wake time in nanoseconds
+/// 0x38: reserved        (8 bytes)
 /// 0x40: voluntary_regs  (64 bytes)  - Callee-saved registers
 /// 0x80: forced_regs     (256 bytes) - All registers (SIGURG)
 /// ```
@@ -57,8 +59,14 @@ pub struct GVThreadMetadata {
     // Generation counter for slot reuse detection (offset 0x28-0x2B)
     pub generation: AtomicU32,
     
-    // Reserved for future use (offset 0x2C-0x3F)
-    _reserved: [u8; 20],
+    // Sleep tracking (offset 0x2C-0x37)
+    /// Non-zero if this GVThread is sleeping and needs timer processing
+    pub sleep_flag: AtomicU32,
+    /// Absolute wake time in nanoseconds (valid when sleep_flag != 0)
+    pub wake_time_ns: AtomicU64,
+    
+    // Reserved for future use (offset 0x38-0x3F)
+    _reserved: [u8; 8],
     
     // Saved registers for voluntary yield (offset 0x40-0x7F)
     // rsp, rip, rbx, rbp, r12, r13, r14, r15
@@ -164,7 +172,9 @@ impl GVThreadMetadata {
             entry_arg: AtomicU64::new(0),
             result_ptr: AtomicU64::new(0),
             generation: AtomicU32::new(0),
-            _reserved: [0; 20],
+            sleep_flag: AtomicU32::new(0),
+            wake_time_ns: AtomicU64::new(0),
+            _reserved: [0; 8],
             voluntary_regs: VoluntarySavedRegs {
                 rsp: 0, rip: 0, rbx: 0, rbp: 0,
                 r12: 0, r13: 0, r14: 0, r15: 0,

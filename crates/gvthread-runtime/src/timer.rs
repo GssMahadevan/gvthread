@@ -11,8 +11,8 @@ use crate::scheduler;
 use gvthread_core::id::GVThreadId;
 use gvthread_core::state::Priority;
 use gvthread_core::SpinLock;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use std::collections::BinaryHeap;
@@ -43,7 +43,101 @@ struct WorkerWatch {
 }
 
 // ============================================================================
-// Sleep Queue
+// Pending Sleep Ring Buffer (lock-free from GVThread side)
+// ============================================================================
+
+/// Ring buffer for pending sleep notifications
+/// GVThreads atomically push, timer thread drains
+const PENDING_SLEEP_CAPACITY: usize = 65536;
+
+struct PendingSleepRing {
+    /// Each slot: 0 = empty, or (gvthread_id << 32) | generation
+    slots: Vec<AtomicU64>,
+    /// Write position (only GVThreads increment)
+    write_pos: AtomicUsize,
+    /// Read position (only timer thread increments)  
+    read_pos: AtomicUsize,
+}
+
+static PENDING_SLEEPS: OnceLock<PendingSleepRing> = OnceLock::new();
+
+fn init_pending_sleeps(capacity: usize) {
+    let _ = PENDING_SLEEPS.get_or_init(|| {
+        let mut slots = Vec::with_capacity(capacity);
+        for _ in 0..capacity {
+            slots.push(AtomicU64::new(0));
+        }
+        PendingSleepRing {
+            slots,
+            write_pos: AtomicUsize::new(0),
+            read_pos: AtomicUsize::new(0),
+        }
+    });
+}
+
+/// Notify timer thread that a GVThread wants to sleep
+/// Called from GVThread stack - must be lock-free!
+fn notify_pending_sleep(gvthread_id: u32, generation: u32) {
+    let ring = PENDING_SLEEPS.get().expect("Pending sleeps not initialized");
+    
+    // Claim a slot atomically
+    let pos = ring.write_pos.fetch_add(1, Ordering::AcqRel) % ring.slots.len();
+    
+    // Write the notification (GVThread ID + generation for validation)
+    let value = ((gvthread_id as u64) << 32) | (generation as u64);
+    ring.slots[pos].store(value, Ordering::Release);
+}
+
+/// Drain pending sleep notifications into the sleep queue
+/// Called from timer thread only
+fn drain_pending_sleeps() {
+    let ring = match PENDING_SLEEPS.get() {
+        Some(r) => r,
+        None => return,
+    };
+    
+    let write_pos = ring.write_pos.load(Ordering::Acquire);
+    let mut read_pos = ring.read_pos.load(Ordering::Relaxed);
+    
+    // Process all pending notifications
+    while read_pos != write_pos {
+        let pos = read_pos % ring.slots.len();
+        let value = ring.slots[pos].swap(0, Ordering::AcqRel);
+        
+        if value != 0 {
+            let gvthread_id = (value >> 32) as u32;
+            let generation = value as u32;
+            
+            // Get wake_time from metadata
+            let meta_ptr = crate::memory::get_metadata_ptr(gvthread_id);
+            let meta = unsafe { &*meta_ptr };
+            
+            // Verify generation matches (slot wasn't reused)
+            if meta.generation.load(Ordering::Acquire) == generation {
+                let wake_time = meta.wake_time_ns.load(Ordering::Acquire);
+                let priority = meta.get_priority();
+                
+                // Clear sleep flag
+                meta.sleep_flag.store(0, Ordering::Release);
+                
+                // Add to actual sleep queue (now on timer thread stack - safe!)
+                add_to_sleep_queue(SleepEntry {
+                    wake_time_ns: wake_time,
+                    gvthread_id: GVThreadId::new(gvthread_id),
+                    priority,
+                    generation,
+                });
+            }
+        }
+        
+        read_pos += 1;
+    }
+    
+    ring.read_pos.store(read_pos, Ordering::Release);
+}
+
+// ============================================================================
+// Sleep Queue (only accessed from timer thread now)
 // ============================================================================
 
 /// Entry in the sleep queue
@@ -82,8 +176,12 @@ static SLEEP_QUEUE: SpinLock<Option<BinaryHeap<SleepEntry>>> = SpinLock::new(Non
 
 /// Initialize the sleep queue with given capacity
 pub fn init_sleep_queue_with_capacity(capacity: usize) {
+    // Initialize pending sleeps ring buffer
+    init_pending_sleeps(capacity);
+    
+    // Initialize the actual sleep queue
     let mut queue = SLEEP_QUEUE.lock();
-    // Pre-allocate to avoid reallocation from GVThread stack
+    // Pre-allocate to avoid reallocation
     *queue = Some(BinaryHeap::with_capacity(capacity));
 }
 
@@ -93,6 +191,7 @@ pub fn init_sleep_queue() {
 }
 
 /// Add a GVThread to the sleep queue
+/// NOTE: Only called from timer thread now (safe to use SpinLock)
 fn add_to_sleep_queue(entry: SleepEntry) {
     let mut queue = SLEEP_QUEUE.lock();
     if let Some(ref mut q) = *queue {
@@ -143,6 +242,8 @@ fn process_sleep_queue() {
 /// This yields the GVThread and schedules it to wake up after the duration.
 /// Unlike `std::thread::sleep`, this does NOT block the worker thread.
 ///
+/// This function is LOCK-FREE from GVThread stack - only atomic operations.
+///
 /// # Panics
 /// Panics if called from outside a GVThread.
 pub fn sleep(duration: Duration) {
@@ -160,21 +261,21 @@ pub fn sleep(duration: Duration) {
         return;
     }
     
-    // Get priority and generation from metadata
+    // Get metadata pointer
     let meta = unsafe { &*(meta_base as *const gvthread_core::GVThreadMetadata) };
-    let priority = meta.get_priority();
     let generation = meta.get_generation();
     
     // Calculate wake time
     let wake_time_ns = now_ns() + duration.as_nanos() as u64;
     
-    // Add to sleep queue with generation for stale wake detection
-    add_to_sleep_queue(SleepEntry {
-        wake_time_ns,
-        gvthread_id,
-        priority,
-        generation,
-    });
+    // Store wake time in metadata (atomic - safe from GVThread stack)
+    meta.wake_time_ns.store(wake_time_ns, Ordering::Release);
+    
+    // Set sleep flag (atomic - safe from GVThread stack)
+    meta.sleep_flag.store(1, Ordering::Release);
+    
+    // Notify timer thread (lock-free ring buffer - safe from GVThread stack)
+    notify_pending_sleep(gvthread_id.as_u32(), generation);
     
     // Mark as blocked and yield
     scheduler::block_current();
@@ -248,10 +349,12 @@ fn timer_loop(
     num_workers: usize,
     time_slice_ns: u64,
     grace_period_ns: u64,
-    check_interval: Duration,
+    _check_interval: Duration,  // Ignored - we compute dynamically
     enable_forced_preempt: bool,
     shutdown: Arc<AtomicBool>,
 ) {
+    use gvthread_core::env::env_get;
+    
     // Per-worker tracking
     let mut watches: Vec<WorkerWatch> = (0..num_workers)
         .map(|_| WorkerWatch {
@@ -260,11 +363,45 @@ fn timer_loop(
         })
         .collect();
     
+    // Configurable min/max sleep
+    let min_sleep_us: u64 = env_get("GVT_TIMER_MIN_US", 100);   // 100us min
+    let max_sleep_ms: u64 = env_get("GVT_TIMER_MAX_MS", 10);    // 10ms max
+    
     while !shutdown.load(Ordering::Acquire) {
-        thread::sleep(check_interval);
+        // Check sleep queue for next wake time
+        let sleep_duration = {
+            let queue = SLEEP_QUEUE.lock();
+            if let Some(ref q) = *queue {
+                if let Some(entry) = q.peek() {
+                    let now = now_ns();
+                    if entry.wake_time_ns <= now {
+                        // Work ready now - don't sleep
+                        Duration::from_micros(0)
+                    } else {
+                        // Sleep until next wake, capped
+                        let wait_ns = entry.wake_time_ns - now;
+                        let wait_ms = (wait_ns / 1_000_000).min(max_sleep_ms);
+                        Duration::from_millis(wait_ms.max(min_sleep_us / 1000))
+                    }
+                } else {
+                    // Queue empty - sleep max
+                    Duration::from_millis(max_sleep_ms)
+                }
+            } else {
+                Duration::from_millis(max_sleep_ms)
+            }
+        };
+        
+        if !sleep_duration.is_zero() {
+            thread::sleep(sleep_duration);
+        }
         
         // Update coarse time for low-overhead access
         update_coarse_time();
+        
+        // Drain pending sleep notifications from GVThreads
+        // This moves them from lock-free ring buffer to BinaryHeap
+        drain_pending_sleeps();
         
         // Process sleep queue - wake up sleeping GVThreads
         process_sleep_queue();
