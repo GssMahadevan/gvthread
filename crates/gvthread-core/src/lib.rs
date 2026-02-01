@@ -1,6 +1,6 @@
 //! # gvthread-core
 //!
-//! Core types and traits for the GVThread (Green Virtual Thread) scheduler.
+//! Core types and traits for the GVThread (Generic Virtual Thread) scheduler.
 //!
 //! This crate is platform-agnostic and contains no OS-specific code.
 //! All platform-specific implementations are in `gvthread-runtime`.

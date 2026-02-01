@@ -1,11 +1,11 @@
 # GVThread Architecture
 
-> **Green Virtual Thread** - A high-performance userspace threading library for Rust  
+> **Generic Virtual Thread** - A high-performance userspace threading library for Rust  
 > Named in memory of Gorti Viswanadham (GV)
 
 ## Overview
 
-GVThread provides lightweight cooperative/preemptive green threads with:
+GVThread provides lightweight cooperative/preemptive Generic threads with:
 - **16MB virtual address space** per GVThread (physical memory on-demand)
 - **~20ns voluntary context switch** via hand-written assembly
 - **Hybrid preemption**: cooperative (safepoints) + forced (SIGURG)

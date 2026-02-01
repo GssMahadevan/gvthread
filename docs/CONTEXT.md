@@ -7,7 +7,7 @@
 
 ## Project Summary
 
-**gvthread** is a high-performance userspace green thread library for Rust, named in memory of Gorti Viswanadham (GV). It provides:
+**gvthread** is a high-performance userspace Generic thread library for Rust, named in memory of Gorti Viswanadham (GV). It provides:
 
 - 16MB virtual address slots per GVThread (physical memory on-demand via mmap)
 - ~20ns voluntary context switch (hand-written x86_64 assembly)

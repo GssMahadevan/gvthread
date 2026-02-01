@@ -1,10 +1,10 @@
 # gvthread
 
-**Green Virtual Thread Scheduler for Rust**
+**Generic Virtual Thread Scheduler for Rust**
 
 *Named in memory of Gorti Viswanadham*
 
-A high-performance userspace threading library that provides lightweight green threads (GVThreads) with preemptive scheduling.
+A high-performance userspace threading library that provides lightweight Generic threads (GVThreads) with preemptive scheduling.
 
 ## Features
 

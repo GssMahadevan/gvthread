@@ -4,7 +4,7 @@
 
 ## Project
 
-**gvthread** - High-performance userspace green threads for Rust  
+**gvthread** - High-performance userspace Generic threads for Rust  
 **Repo:** https://github.com/GssMahadevan/gvthread  
 **Dev:** GssMahadevan
 

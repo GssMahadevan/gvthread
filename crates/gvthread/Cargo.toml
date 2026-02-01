@@ -1,6 +1,6 @@
 [package]
 name = "gvthread"
-description = "Green Virtual Thread scheduler for Rust - High-performance userspace threading"
+description = "Generic Virtual Thread scheduler for Rust - High-performance userspace threading"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

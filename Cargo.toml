@@ -25,7 +25,7 @@ edition = "2021"
 authors = ["GssMahadevan"]
 license = "MIT"
 repository = "https://github.com/gssmahadevan/gvthread"
-keywords = ["async", "threading", "scheduler", "green-threads", "concurrency"]
+keywords = ["async", "threading", "scheduler", "Generic-threads", "concurrency"]
 categories = ["concurrency", "asynchronous"]
 rust-version = "1.79"  # Required for naked_asm! (stabilized in 1.79)
 
