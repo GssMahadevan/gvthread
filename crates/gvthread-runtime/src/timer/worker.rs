@@ -88,20 +88,45 @@ pub trait TimerWakeCallback: Send + Sync {
 }
 
 /// Handle to a running timer thread
+///
+/// Provides separate `shutdown()` and `join()` methods for graceful
+/// termination, matching the scheduler's expected interface.
 pub struct TimerThreadHandle {
+    /// Thread join handle (Option to allow taking in join())
     handle: Option<JoinHandle<TimerStats>>,
+    /// Shutdown signal
     shutdown: Arc<AtomicBool>,
 }
 
 impl TimerThreadHandle {
-    /// Request shutdown and wait for the timer thread to exit
-    pub fn shutdown(mut self) -> TimerStats {
+    /// Request shutdown (non-blocking)
+    ///
+    /// Signals the timer thread to exit. Call `join()` afterwards
+    /// to wait for the thread to finish.
+    pub fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
+    }
+
+    /// Wait for the timer thread to exit
+    ///
+    /// Returns statistics from the timer thread's execution.
+    /// Must be called after `shutdown()`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called twice or if the timer thread panicked.
+    pub fn join(&mut self) -> TimerStats {
         self.handle
             .take()
-            .expect("handle already taken")
+            .expect("join() called twice or handle missing")
             .join()
             .expect("timer thread panicked")
+    }
+
+    /// Shutdown and join in one call (convenience method)
+    pub fn stop(&mut self) -> TimerStats {
+        self.shutdown();
+        self.join()
     }
 
     /// Check if shutdown has been requested
@@ -109,9 +134,9 @@ impl TimerThreadHandle {
         self.shutdown.load(Ordering::Acquire)
     }
 
-    /// Request shutdown without waiting
-    pub fn request_shutdown(&self) {
-        self.shutdown.store(true, Ordering::Release);
+    /// Check if the thread is still running
+    pub fn is_running(&self) -> bool {
+        self.handle.is_some() && !self.is_shutdown_requested()
     }
 }
 
@@ -202,7 +227,7 @@ where
 
         // Smart sleep: until next deadline or max interval
         let sleep_duration = calculate_sleep(&backend, &config);
-        
+
         if sleep_duration > Duration::ZERO {
             thread::sleep(sleep_duration);
         }
@@ -307,17 +332,19 @@ mod tests {
         // Insert a timer that fires quickly
         backend.insert(TimerEntry::sleep(42, Duration::from_millis(10), None));
 
-        let handle = spawn_timer_thread(
+        let mut handle = spawn_timer_thread(
             backend,
             callback.clone(),
-            shutdown,
+            shutdown.clone(),
             TimerThreadConfig::default(),
         );
 
         // Wait for timer to fire
         thread::sleep(Duration::from_millis(50));
 
-        let stats = handle.shutdown();
+        // Shutdown and join separately (matching scheduler usage)
+        handle.shutdown();
+        let stats = handle.join();
 
         assert!(stats.timers_fired >= 1);
         assert!(callback.woken_gvts().contains(&42));
@@ -332,16 +359,17 @@ mod tests {
         // Insert preemption timer with affinity
         backend.insert(TimerEntry::preempt(42, 3, Duration::from_millis(5)));
 
-        let handle = spawn_timer_thread(
+        let mut handle = spawn_timer_thread(
             backend,
             callback.clone(),
-            shutdown,
+            shutdown.clone(),
             TimerThreadConfig::default(),
         );
 
         thread::sleep(Duration::from_millis(50));
 
         handle.shutdown();
+        handle.join();
 
         assert!(callback.woken_gvts().contains(&42));
     }
@@ -364,18 +392,40 @@ mod tests {
 
         backend.insert(TimerEntry::sleep(42, Duration::from_millis(5), None));
 
-        let handle = spawn_timer_thread_fn(
+        let mut handle = spawn_timer_thread_fn(
             backend,
             move |expired| {
                 woken_clone.lock().unwrap().push(expired.gvt_id);
             },
-            shutdown,
+            shutdown.clone(),
             TimerThreadConfig::default(),
         );
 
         thread::sleep(Duration::from_millis(50));
-        handle.shutdown();
+        handle.stop(); // Use convenience method
 
         assert!(woken.lock().unwrap().contains(&42));
+    }
+
+    #[test]
+    fn test_is_running() {
+        let backend = Arc::new(HeapTimerBackend::new());
+        let callback = Arc::new(TestCallback::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let mut handle = spawn_timer_thread(
+            backend,
+            callback,
+            shutdown.clone(),
+            TimerThreadConfig::default(),
+        );
+
+        assert!(handle.is_running());
+        assert!(!handle.is_shutdown_requested());
+
+        handle.shutdown();
+        assert!(handle.is_shutdown_requested());
+
+        handle.join();
     }
 }

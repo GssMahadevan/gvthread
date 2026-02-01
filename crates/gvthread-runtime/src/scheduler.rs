@@ -292,7 +292,7 @@ impl Scheduler {
         std::thread::sleep(std::time::Duration::from_millis(10));
         
         // Stop timer thread
-        if let Some(timer) = self.timer_thread.take() {
+        if let Some(mut timer) = self.timer_thread.take() {
             timer.shutdown();
             timer.join();
         }
