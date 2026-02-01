@@ -1,4 +1,3 @@
-
 # GVThread Architecture
 
 > **Green Virtual Thread** - A high-performance userspace threading library for Rust  
@@ -10,7 +9,7 @@ GVThread provides lightweight cooperative/preemptive green threads with:
 - **16MB virtual address space** per GVThread (physical memory on-demand)
 - **~20ns voluntary context switch** via hand-written assembly
 - **Hybrid preemption**: cooperative (safepoints) + forced (SIGURG)
-- **O(1) scheduling** via atomic bitmaps
+- **Go-like scheduling**: per-worker local queues + global queue + work stealing
 - **2M+ concurrent GVThreads** supported
 
 ```
@@ -22,7 +21,7 @@ GVThread provides lightweight cooperative/preemptive green threads with:
                                ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                         Scheduler                                │
-│              Bitmap scan, priority, worker coordination          │
+│            Ready queue (local + global), worker coordination     │
 └─────────────────────────────────────────────────────────────────┘
                                │
            ┌───────────────────┼───────────────────┐
@@ -70,7 +69,6 @@ Zero platform dependencies. Contains:
 | `state.rs` | `GVThreadState` enum, `Priority` enum |
 | `error.rs` | `SchedError`, `MemoryError`, `WorkerError` |
 | `metadata.rs` | `GVThreadMetadata`, `VoluntarySavedRegs`, `ForcedSavedRegs`, `WorkerState` |
-| `bitmap.rs` | `ReadyBitmaps` - O(1) scheduling with atomic u64 blocks |
 | `slot.rs` | `SlotAllocator` - LIFO free stack for cache locality |
 | `channel.rs` | Bounded MPMC channel |
 | `mutex.rs` | `SchedMutex<T>` - scheduler-aware mutex |
@@ -87,7 +85,8 @@ Platform-specific implementation:
 | `config.rs` | `SchedulerConfig` with builder pattern |
 | `scheduler.rs` | Main `Scheduler` struct, spawn/yield/schedule |
 | `worker.rs` | `WorkerPool`, `WorkerStates` array (4KB, 64 entries) |
-| `timer.rs` | `TimerThread` - scans workers, detects stuck GVThreads |
+| `ready_queue.rs` | Go-like ready queue with local + global queues |
+| `timer/` | Timer subsystem (see Timer Architecture below) |
 | `tls.rs` | Thread-local: worker_id, current_gthread_id, gvthread_base |
 | `memory/` | mmap-based slot allocation |
 | `signal/` | SIGURG handler for forced preemption |
@@ -166,7 +165,7 @@ Offset  Size  Field
 0x20    8     result_ptr (AtomicU64)
 0x28    8     join_waiters (AtomicU64)
 0x30    8     start_time_ns (AtomicU64)
-0x38    8     _padding
+0x38    8     wake_time_ns (AtomicU64)    ← For sleep queue
 
 0x40    64    voluntary_regs (VoluntarySavedRegs)
               ├─ rsp, rip, rbx, rbp, r12, r13, r14, r15
@@ -201,6 +200,47 @@ Global array: `WorkerStates` - 64 × 64 = 4KB total (single page, no TLB misses)
 
 ## Scheduling
 
+### Ready Queue (Go-like Design)
+
+The scheduler uses a queue-based design inspired by Go's runtime, replacing the earlier bitmap-based approach for better cache locality and reduced contention:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Ready Queue                               │
+├─────────────────────────────────────────────────────────────────┤
+│  Worker 0      Worker 1      Worker 2      ...     Worker N     │
+│  ┌───────┐    ┌───────┐    ┌───────┐             ┌───────┐     │
+│  │ Local │    │ Local │    │ Local │             │ Local │     │
+│  │ Queue │    │ Queue │    │ Queue │             │ Queue │     │
+│  └───────┘    └───────┘    └───────┘             └───────┘     │
+│       │            │            │                     │         │
+│       └────────────┴────────────┴─────────────────────┘         │
+│                              │                                   │
+│                    ┌─────────────────┐                          │
+│                    │  Global Queue   │                          │
+│                    │  (overflow +    │                          │
+│                    │   new spawns)   │                          │
+│                    └─────────────────┘                          │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Pop order (worker N looking for work):**
+1. Own local queue (fast path, no contention)
+2. Global queue
+3. Steal from other workers' local queues
+
+**Push behavior:**
+- `spawn()` → Global queue (any worker can take)
+- `yield()` with worker hint → Local queue of hinted worker
+- Timer wake → Local queue if affinity set, else global
+
+### Worker Affinity
+
+GVThreads can have worker affinity for cache locality:
+- Preemption timers always set affinity to current worker
+- Sleep timers optionally preserve affinity for short sleeps
+- Explicit affinity via spawn options (future)
+
 ### Priority Levels
 
 ```rust
@@ -212,27 +252,74 @@ enum Priority {
 }
 ```
 
-### Ready Bitmaps
+Priority is tracked in metadata. Low-priority workers only run Low priority GVThreads.
+
+---
+
+## Timer Architecture
+
+The timer subsystem handles sleep scheduling and preemption monitoring:
 
 ```
-Per-priority bitmap: 2M bits = 32,768 × u64 blocks
-
-┌─────────────────────────────────────────────────────┐
-│ Block 0  │ Block 1  │ Block 2  │ ... │ Block 32767 │
-│ bits 0-63│ bits 64+ │          │     │             │
-└─────────────────────────────────────────────────────┘
-
-Operations:
-- set_ready(id):    atomic OR on block[id/64]
-- clear_ready(id):  atomic AND on block[id/64]
-- find_and_claim(): scan blocks, atomic clear first set bit
+src/timer/
+├── mod.rs           # Main: sleep queue, preemption loop, TimerThread
+├── entry.rs         # TimerEntry, TimerHandle, TimerType
+├── registry.rs      # TimerRegistry high-level API
+├── worker.rs        # Timer thread spawning utilities
+└── impls/
+    ├── mod.rs       # Backend factory
+    └── heap.rs      # HeapTimerBackend (BinaryHeap)
 ```
 
-### Fairness
+### Timer Thread Responsibilities
 
-- Random starting block per `find_and_claim()` call
-- Prevents starvation of high-numbered GVThreads
-- O(1) amortized with uniform distribution
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      Timer Thread Loop                          │
+├─────────────────────────────────────────────────────────────────┤
+│  1. Sleep until next wake time (or max interval)                │
+│                                                                 │
+│  2. Update coarse time (cheap reads for other threads)          │
+│                                                                 │
+│  3. Process sleep queue:                                        │
+│     - Pop expired entries from BinaryHeap                       │
+│     - Verify generation (avoid stale wakes)                     │
+│     - Call scheduler::wake_gvthread()                           │
+│                                                                 │
+│  4. Check preemption:                                           │
+│     - For each worker with active GVThread                      │
+│     - If activity_counter unchanged > time_slice:               │
+│       - Set preempt_flag (cooperative hint)                     │
+│       - If still stuck > grace_period: send SIGURG              │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Sleep Queue
+
+```rust
+// BinaryHeap min-heap ordered by wake_time_ns
+struct SleepEntry {
+    wake_time_ns: u64,
+    gvthread_id: u32,
+    generation: u32,  // Prevents stale wakes after slot reuse
+}
+```
+
+Protected by SpinLock (safe from GVThread stack - no syscalls).
+
+### Time Utilities
+
+```rust
+now_ns()        // Precise monotonic time (Instant-based)
+coarse_now_ns() // Cheap cached time (updated by timer thread)
+```
+
+### Future: Pluggable Backends
+
+The `TimerBackend` trait allows swapping implementations:
+- `HeapTimerBackend` - Current MVP (BinaryHeap)
+- `WheelTimerBackend` - Hierarchical timing wheel (O(1) insert)
+- `KernelTimerBackend` - timerfd/io_uring based
 
 ---
 
@@ -295,23 +382,19 @@ Safepoint expands to:
 
 ### Forced (SIGURG)
 
-Timer thread detects stuck GVThreads:
+Timer thread detects stuck GVThreads via WorkerWatch:
 
+```rust
+struct WorkerWatch {
+    last_counter: u32,
+    first_stall_time: Option<Instant>,
+}
 ```
-Timer Loop (every 1ms):
-┌─────────────────────────────────────────────────────────┐
-│ for worker in workers:                                  │
-│   if worker.current_gthread != NONE:                    │
-│     if worker.activity_counter == last_seen[worker]:    │
-│       if first_stall_time.elapsed() > time_slice:       │
-│         metadata.preempt_flag = 1  // Cooperative hint  │
-│         if elapsed() > time_slice + grace_period:       │
-│           pthread_kill(worker.thread_id, SIGURG)        │
-│     else:                                               │
-│       last_seen[worker] = activity_counter              │
-│       first_stall_time = None                           │
-└─────────────────────────────────────────────────────────┘
-```
+
+Detection flow:
+1. If `activity_counter` unchanged → start tracking stall time
+2. After `time_slice` → set `preempt_flag` (cooperative hint)
+3. After `time_slice + grace_period` → `pthread_kill(SIGURG)`
 
 SIGURG Handler:
 1. Save all registers to `forced_regs`
@@ -425,7 +508,13 @@ fn main() {
 
 ---
 
-## Performance Targets
+## Performance
+
+### Achieved
+- Voluntary context switch: **~20ns**
+- CPU utilization matches Go's goroutines after queue refactor
+
+### Targets
 
 | Metric | Target | Notes |
 |--------|--------|-------|
@@ -441,8 +530,10 @@ fn main() {
 
 1. **16MB fixed slots** - Simplifies addressing, avoids fragmentation
 2. **LIFO slot allocator** - Cache-friendly reuse of recently freed slots
-3. **Bitmap scheduling** - O(1) find_and_claim with random start
-4. **Contiguous WorkerStates** - Timer scans 4KB array, no pointer chasing
-5. **SIGURG for preemption** - Per-thread signal, doesn't interrupt syscalls badly
-6. **Two-phase preemption** - Cooperative flag first, forced signal after grace period
-7. **repr(C) metadata** - Stable offsets for hand-written assembly
+3. **Queue-based scheduling** - Go-like local+global queues, better than bitmaps for cache locality
+4. **Worker affinity** - Preserve cache locality for yielding/sleeping GVThreads
+5. **Contiguous WorkerStates** - Timer scans 4KB array, no pointer chasing
+6. **SIGURG for preemption** - Per-thread signal, doesn't interrupt syscalls badly
+7. **Two-phase preemption** - Cooperative flag first, forced signal after grace period
+8. **repr(C) metadata** - Stable offsets for hand-written assembly
+9. **Single sleep queue** - All timers in one BinaryHeap, timer thread polls and wakes
