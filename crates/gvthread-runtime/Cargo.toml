@@ -28,3 +28,5 @@ cc.workspace = true
 default = []
 io-uring = []
 debug-logging = []
+custom-config = []
+
