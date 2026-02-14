@@ -24,6 +24,11 @@ Cargo.lock
 *.sublime-project
 *.sublime-workspace
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
 # OS generated
 .DS_Store
 .DS_Store?
@@ -87,4 +92,3 @@ vgcore.*
 *.tar.xz
 *.7z
 main
-__pycache__/

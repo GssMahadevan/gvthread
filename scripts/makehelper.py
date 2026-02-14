@@ -80,6 +80,7 @@ def categorize_targets(targets):
     categories = OrderedDict([
         ('Build', []),
         ('Test', []),
+        ('Integration Test', []),
         ('Benchmark', []),
         ('Performance', []),
         ('Config', []),
@@ -95,6 +96,7 @@ def categorize_targets(targets):
         'compile': 'Build',
         'test': 'Test',
         'check': 'Test',
+        'itest': 'Integration Test',
         'bench': 'Benchmark',
         'perf': 'Performance',
         'profile': 'Performance',

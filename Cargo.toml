@@ -11,6 +11,11 @@ members = [
 
 ]
 
+exclude = [
+    # Python bytecode dirs that glob patterns might match
+    "cmd/smoke/__pycache__",
+]
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
