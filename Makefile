@@ -32,6 +32,7 @@ include $(MAKEFILES_DIR)/test.mk
 include $(MAKEFILES_DIR)/bench.mk
 include $(MAKEFILES_DIR)/perf.mk
 include $(MAKEFILES_DIR)/clean.mk
+include $(MAKEFILES_DIR)/itest.mk
 
 # Help target using Python parser
 .PHONY: help

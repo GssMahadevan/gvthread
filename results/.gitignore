@@ -1,0 +1,4 @@
+# Ignore individual run results (timestamped), keep baselines
+*.json
+!baseline.json
+!.gitignore
