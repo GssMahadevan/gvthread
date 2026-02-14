@@ -355,39 +355,14 @@ fn submit_file_close(io: &mut BasicIoUring, r: &ProbeRouter, fd: i32, idx: usize
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let mut port: u16 = 8080;
-    let mut serve_dir: Option<String> = None;
-    let mut max_conns: usize = 4096;
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--port" | "-p" => { i += 1; port = args[i].parse().unwrap_or(8080); }
-            "--dir" | "-d" => { i += 1; serve_dir = Some(args[i].clone()); }
-            "--max-conns" => { i += 1; max_conns = args[i].parse().unwrap_or(4096); }
-            s if s.parse::<u16>().is_ok() => { port = s.parse().unwrap(); }
-            _ => {}
-        }
-        i += 1;
-    }
-
-    unsafe {
-        libc::signal(libc::SIGINT, handle_sigint as usize);
-        libc::signal(libc::SIGTERM, handle_sigint as usize);
-        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
-    }
-
-    let file_mode = serve_dir.is_some();
-    let base_dir = serve_dir.unwrap_or_default();
-
-    eprintln!("ksvc-httpd: port={} max_conns={} mode={}",
-        port, max_conns,
-        if file_mode { format!("file({})", base_dir) } else { "hello".into() });
-
+/// Per-thread worker: own listener (SO_REUSEPORT), own io_uring ring, own ConnSlab.
+/// Completely independent — zero cross-thread synchronization.
+fn worker_loop(wid: usize, num_workers: usize, port: u16, max_conns: usize,
+               file_mode: bool, base_dir: &str)
+{
     let hello_response = make_hello_response();
     let not_found_response = make_404_response();
+    let base_dir = base_dir.to_string();
 
     let listener = setup_listener(port);
     let mut io = BasicIoUring::new(BasicIoUringConfig {
@@ -397,9 +372,12 @@ fn main() {
 
     let supported = io.probe_opcodes_static();
     let router = ProbeRouter::new(&supported);
-    let counts = router.tier_counts();
-    eprintln!("ksvc-httpd: routing T0={} T1={} T2={} T3={}",
-        counts.tier0, counts.tier1, counts.tier2, counts.tier3);
+
+    if wid == 0 {
+        let counts = router.tier_counts();
+        eprintln!("ksvc-httpd: routing T0={} T1={} T2={} T3={}",
+            counts.tier0, counts.tier1, counts.tier2, counts.tier3);
+    }
 
     let mut conns = ConnSlab::new(max_conns);
     let mut stats = Stats::new();
@@ -414,7 +392,10 @@ fn main() {
     let mut last_stats = start;
     let mut comp_buf = [IoCompletion { corr_id: CorrId(0), result: 0, flags: 0 }; 128];
 
-    eprintln!("ksvc-httpd: listening on http://0.0.0.0:{}/", port);
+    let w_tag = if num_workers > 1 { format!("[w{}] ", wid) } else { String::new() };
+
+    eprintln!("{}ksvc-httpd: listening on http://0.0.0.0:{}/ (ring {}/{})",
+        w_tag, port, wid + 1, num_workers);
 
     // ── Event loop ──
     while RUNNING.load(Ordering::Relaxed) {
@@ -654,14 +635,92 @@ fn main() {
         // Stats every 5s
         let now = std::time::Instant::now();
         if now.duration_since(last_stats).as_secs() >= 5 {
+            eprint!("{}", w_tag);
             stats.print(&conns, now.duration_since(start).as_secs_f64());
             last_stats = now;
         }
     }
 
-    eprintln!("\nksvc-httpd: shutting down...");
+    eprint!("{}", w_tag);
     stats.print(&conns, start.elapsed().as_secs_f64());
     unsafe { libc::close(listener); }
+}
+
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let mut port: u16 = 8080;
+    let mut serve_dir: Option<String> = None;
+    let mut max_conns: usize = 4096;
+    let mut num_threads: usize = 1;
+
+    // Parse --threads from CLI
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--port" | "-p" => { i += 1; port = args[i].parse().unwrap_or(8080); }
+            "--dir" | "-d" => { i += 1; serve_dir = Some(args[i].clone()); }
+            "--max-conns" => { i += 1; max_conns = args[i].parse().unwrap_or(4096); }
+            "--threads" | "-t" => { i += 1; num_threads = args[i].parse().unwrap_or(1); }
+            s if s.parse::<u16>().is_ok() => { port = s.parse().unwrap(); }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    // KSVC_THREADS env overrides CLI (allows: KSVC_THREADS=4 make itest-httpd-ksvc)
+    if let Ok(t) = std::env::var("KSVC_THREADS") {
+        if let Ok(n) = t.parse::<usize>() {
+            if n >= 1 { num_threads = n; }
+        }
+    }
+
+    num_threads = num_threads.max(1);
+
+    unsafe {
+        libc::signal(libc::SIGINT, handle_sigint as usize);
+        libc::signal(libc::SIGTERM, handle_sigint as usize);
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+
+    let file_mode = serve_dir.is_some();
+    let base_dir = serve_dir.unwrap_or_default();
+
+    // Divide connection slots among workers
+    let conns_per_worker = max_conns / num_threads;
+
+    eprintln!("ksvc-httpd: port={} threads={} max_conns={}({}/worker) mode={}",
+        port, num_threads, max_conns, conns_per_worker,
+        if file_mode { format!("file({})", base_dir) } else { "hello".into() });
+
+    if num_threads == 1 {
+        // Single-thread: run directly on main thread (zero overhead)
+        worker_loop(0, 1, port, conns_per_worker, file_mode, &base_dir);
+    } else {
+        // Multi-ring: each thread gets its own listener + io_uring ring
+        let base_dir = std::sync::Arc::new(base_dir);
+        let mut handles = Vec::with_capacity(num_threads - 1);
+
+        for wid in 1..num_threads {
+            let bd = base_dir.clone();
+            handles.push(std::thread::Builder::new()
+                .name(format!("ksvc-w{}", wid))
+                .spawn(move || {
+                    worker_loop(wid, num_threads, port, conns_per_worker, file_mode, &bd);
+                })
+                .expect("failed to spawn worker thread"));
+        }
+
+        // Worker 0 runs on main thread
+        worker_loop(0, num_threads, port, conns_per_worker, file_mode, &base_dir);
+
+        // Wait for all workers
+        for h in handles {
+            let _ = h.join();
+        }
+    }
+
+    eprintln!("\nksvc-httpd: shutdown complete");
 }
 
 extern "C" fn handle_sigint(_sig: libc::c_int) {

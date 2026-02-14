@@ -7,6 +7,10 @@ TEST_RUNNER  := $(PYTHON) itests/test-runner.py
 PORT_BASE    ?= 9100
 WRK_THREADS  ?= 2
 THRESHOLD    ?= 5.0
+KSVC_THREADS ?= 1
+
+# Export KSVC_THREADS so it flows: make → test-runner → ksvc-httpd binary
+export KSVC_THREADS
 
 # ─── Discovery ──────────────────────────────────────────────
 
@@ -44,10 +48,10 @@ itest-echo-rust: ## Run echo benchmark for Rust servers (KSVC + Tokio)
 
 # ─── HTTP Benchmarks ────────────────────────────────────────
 
-itest-httpd-all: ## Run HTTP benchmarks for all servers (requires wrk)
+itest-httpd-all: ## Run HTTP benchmarks for all servers (KSVC_THREADS=N for multi-ring)
 	@$(TEST_RUNNER) httpd --port-base $(PORT_BASE) --wrk-threads $(WRK_THREADS)
 
-itest-httpd-ksvc: ## Run HTTP benchmark for KSVC only
+itest-httpd-ksvc: ## Run HTTP benchmark for KSVC only (KSVC_THREADS=N for multi-ring)
 	@$(TEST_RUNNER) httpd --servers ksvc --port-base $(PORT_BASE) --wrk-threads $(WRK_THREADS)
 
 itest-httpd-tokio: ## Run HTTP benchmark for Tokio only

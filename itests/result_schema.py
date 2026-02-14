@@ -133,8 +133,12 @@ def print_comparison_table(results: dict, test_type: str):
         print("No results to compare.")
         return
 
-    # Collect all test names (union across servers)
+    # Build display labels (e.g. "ksvc(2t)" when multi-threaded)
     servers = sorted(results.keys())
+    labels = {}
+    for s in servers:
+        kt = results[s].metadata.get("ksvc_threads")
+        labels[s] = f"{s}({kt}t)" if kt and kt > 1 else s
     all_names = []
     for r in results.values():
         for t in r.tests:
@@ -151,7 +155,7 @@ def print_comparison_table(results: dict, test_type: str):
     # Header
     hdr = f"{'Test':<20}"
     for s in servers:
-        hdr += f"  {s:>10} req/s"
+        hdr += f"  {labels[s]:>10} req/s"
         if has_latency:
             hdr += f"  {'p99':>7}"
     print(f"\n{'='*len(hdr)}")
@@ -183,7 +187,7 @@ def print_comparison_table(results: dict, test_type: str):
         valid = {s: v for s, v in vals.items() if v}
         if valid:
             winner = max(valid, key=valid.get)
-            row += f"  << {winner}"
+            row += f"  << {labels[winner]}"
         print(row)
 
     print("-" * len(hdr))

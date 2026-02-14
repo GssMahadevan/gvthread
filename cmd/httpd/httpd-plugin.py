@@ -7,6 +7,7 @@ Falls back to Python if wrk is not installed.
 Used by itests/test-runner.py.
 """
 
+import os
 import re
 import shutil
 import subprocess
@@ -47,7 +48,11 @@ SERVERS = {
         "cargo_package": "ksvc-httpd",
         "cmd": "target/release/ksvc-httpd",
         "args": lambda port: ["--port", str(port)],
-        "env": lambda port: {},
+        "env": lambda port: {
+            # KSVC_THREADS flows from shell → make → test-runner → server
+            # Server reads it for multi-ring io_uring scaling
+            k: v for k, v in {"KSVC_THREADS": os.environ.get("KSVC_THREADS", "")}.items() if v
+        },
         "startup_wait_s": 0.5,
     },
 }
@@ -227,7 +232,12 @@ def run_bench(server_name: str, port: int, wrk_threads: int = 2, **kwargs) -> Te
     if not has_wrk:
         print("    WARNING: wrk not found — using Python fallback (results will be client-limited)")
 
+    # Capture KSVC server thread count for metadata
+    ksvc_threads = int(os.environ.get("KSVC_THREADS", "1")) if server_name == "ksvc" else 0
+
     result = TestResult(test_type="httpd", server=server_name)
+    if ksvc_threads > 1:
+        result.metadata["ksvc_threads"] = ksvc_threads
 
     for scenario in SCENARIOS:
         # Override wrk threads from CLI if specified
@@ -248,7 +258,7 @@ def run_bench(server_name: str, port: int, wrk_threads: int = 2, **kwargs) -> Te
             p50_us=bench.get("p50_us"),
             p99_us=bench.get("p99_us"),
             duration_s=scenario["duration_s"],
-            threads=1 if server_name == "ksvc" else 0,
+            threads=ksvc_threads if server_name == "ksvc" else 0,
             extra={
                 "wrk_threads": scenario["threads"],
                 "connections": scenario["connections"],
