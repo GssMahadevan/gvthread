@@ -179,10 +179,12 @@ fn test_kmod(t: &mut TestRunner) -> Option<(*const u8, i32)> {
     );
 
     // A10: submit ring header
+    // 64 entries × 64 bytes = 4096 data + 4096 header = 2 pages
+    let submit_ring_size: usize = 4096 + 4096 * ((64 * 64 + 4095) / 4096);
     let submit_ptr = unsafe {
         libc::mmap(
-            std::ptr::null_mut(), 4096 * 4,
-            libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED,
+        std::ptr::null_mut(), submit_ring_size,
+        libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED,
             ksvc_fd, ksvc_sys::KSVC_OFF_SUBMIT_RING as i64,
         )
     };

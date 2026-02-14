@@ -61,18 +61,18 @@ impl BasicIoUring {
 
     /// Probe supported opcodes via IORING_REGISTER_PROBE.
     pub fn probe_opcodes_static(&self) -> Vec<u8> {
-        // Use the io-uring crate's probe API
-        match io_uring::Probe::new() {
-            probe => {
-                let mut opcodes = Vec::new();
-                for opc in 0..=80u8 {
-                    if probe.is_supported(opc) {
-                        opcodes.push(opc);
-                    }
-                }
-                opcodes
+        let mut probe = io_uring::Probe::new();
+        if self.ring.submitter().register_probe(&mut probe).is_err() {
+            eprintln!("ksvc: IORING_REGISTER_PROBE failed, Tier 1 disabled");
+            return Vec::new();
+        }
+        let mut opcodes = Vec::new();
+        for opc in 0..=80u8 {
+            if probe.is_supported(opc) {
+                opcodes.push(opc);
             }
         }
+        opcodes
     }
 
     /// Translate a KSVC SubmitEntry to an io_uring SQE and push it.
