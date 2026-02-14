@@ -2,7 +2,7 @@
 //!
 //! Idiomatic async Tokio echo for comparison with ksvc-echo.
 //! Uses epoll under the hood (tokio's mio runtime).
-//! cargo build --release -p ksvc-echo -p tokio-echo
+//!
 //! Usage:
 //!     ./target/release/tokio-echo [port]
 //!

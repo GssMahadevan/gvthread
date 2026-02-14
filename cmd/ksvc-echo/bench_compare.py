@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-KSVC vs Tokio Echo Server Benchmark
+KSVC vs Tokio vs Go Echo Server Benchmark
 
 Starts each server, runs identical load tests, prints side-by-side comparison.
 
 Usage:
     python3 cmd/ksvc-echo/bench_compare.py [--build]
 
-Requires: both ksvc-echo and tokio-echo built in target/release/
+Requires:
+    ./target/release/ksvc-echo
+    ./target/release/tokio-echo
+    ./cmd/go-echo/go-echo  (or pass --build to auto-build)
 """
 
 import subprocess
@@ -16,11 +19,11 @@ import sys
 import os
 import signal
 import socket
-import json
 import argparse
 
 KSVC_PORT = 9999
 TOKIO_PORT = 9998
+GO_PORT = 9997
 
 # Test configurations: (threads, messages, size, label)
 TESTS = [
@@ -31,23 +34,29 @@ TESTS = [
     (200, 1000,   64,  "storm:  200 conn × 1K msgs × 64B"),
 ]
 
+# Server definitions: (name, binary, port, build_cmd)
+SERVERS = [
+    ("Go",    "./cmd/go-echo/go-echo",       GO_PORT,
+     ["go", "build", "-o", "./cmd/go-echo/go-echo", "./cmd/go-echo/main.go"]),
+    ("Tokio", "./target/release/tokio-echo",  TOKIO_PORT,
+     ["cargo", "build", "--release", "-p", "tokio-echo"]),
+    ("KSVC",  "./target/release/ksvc-echo",   KSVC_PORT,
+     ["cargo", "build", "--release", "-p", "ksvc-echo"]),
+]
 
-def build_if_needed(do_build):
-    if not do_build:
-        return
-    print("Building...")
-    r = subprocess.run(
-        ["cargo", "build", "--release", "-p", "ksvc-echo", "-p", "tokio-echo"],
-        capture_output=True, text=True,
-    )
-    if r.returncode != 0:
-        print(f"Build failed:\n{r.stderr}")
-        sys.exit(1)
-    print("Build OK.\n")
+
+def build_all():
+    for name, binary, _, cmd in SERVERS:
+        print(f"  Building {name}...", end=" ", flush=True)
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"FAILED\n{r.stderr}")
+            sys.exit(1)
+        print("OK")
+    print()
 
 
 def wait_for_port(port, timeout=5.0):
-    """Wait until a server is listening on the given port."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
@@ -62,12 +71,11 @@ def wait_for_port(port, timeout=5.0):
 
 
 def start_server(binary, port):
-    """Start a server process, wait for it to be ready."""
     proc = subprocess.Popen(
         [binary, str(port)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
-        preexec_fn=os.setsid,  # new process group for clean kill
+        preexec_fn=os.setsid,
     )
     if not wait_for_port(port):
         proc.kill()
@@ -76,7 +84,6 @@ def start_server(binary, port):
 
 
 def stop_server(proc):
-    """Stop a server process cleanly."""
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
     except ProcessLookupError:
@@ -89,7 +96,6 @@ def stop_server(proc):
 
 
 def run_test(port, threads, messages, size):
-    """Run test_echo.py and parse results."""
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_echo.py")
     result = subprocess.run(
         [
@@ -104,13 +110,11 @@ def run_test(port, threads, messages, size):
         timeout=120,
     )
 
-    # Parse output for key metrics
     lines = result.stdout.strip().split("\n")
     metrics = {}
     for line in lines:
         line = line.strip()
         if "Throughput:" in line:
-            # "Throughput:     31,776 msg/s"
             val = line.split(":")[1].strip().replace(",", "").split()[0]
             metrics["msg_per_sec"] = float(val)
         elif "Latency avg:" in line:
@@ -151,120 +155,132 @@ def run_test(port, threads, messages, size):
     return metrics
 
 
-def fmt_ratio(ksvc_val, tokio_val):
-    """Format as ratio: '0.85×' or '1.20×'."""
-    if tokio_val == 0:
-        return "N/A"
-    ratio = ksvc_val / tokio_val
-    return f"{ratio:.2f}x"
-
-
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--build", action="store_true", help="Build before running")
+    parser.add_argument("--build", action="store_true", help="Build all servers before running")
     parser.add_argument("--tests", type=str, default="all",
                         help="Comma-separated test indices (0-based), or 'all'")
     args = parser.parse_args()
 
-    build_if_needed(args.build)
+    if args.build:
+        print("Building servers...")
+        build_all()
 
-    ksvc_bin = "./target/release/ksvc-echo"
-    tokio_bin = "./target/release/tokio-echo"
-
-    for b in [ksvc_bin, tokio_bin]:
-        if not os.path.exists(b):
-            print(f"ERROR: {b} not found. Run: cargo build --release -p ksvc-echo -p tokio-echo")
+    # Check binaries exist
+    for name, binary, _, _ in SERVERS:
+        if not os.path.exists(binary):
+            print(f"ERROR: {binary} not found. Run with --build or build manually.")
             sys.exit(1)
 
-    # Select tests
     if args.tests == "all":
         selected = list(range(len(TESTS)))
     else:
         selected = [int(x) for x in args.tests.split(",")]
 
-    print("=" * 78)
-    print("  KSVC Echo vs Tokio Echo — Side-by-Side Benchmark")
-    print("=" * 78)
+    W = 90
+    print("=" * W)
+    print("  KSVC vs Tokio vs Go — Echo Server Benchmark")
+    print("=" * W)
 
+    # all_results[test_idx] = (label, { "Go": metrics, "Tokio": metrics, "KSVC": metrics })
     all_results = []
 
     for tidx in selected:
         threads, messages, size, label = TESTS[tidx]
         total = threads * messages
 
-        print(f"\n{'─' * 78}")
+        print(f"\n{'─' * W}")
         print(f"  Test {tidx}: {label}")
         print(f"  Total: {total:,} messages, {total * size / 1024:.0f} KB")
-        print(f"{'─' * 78}")
+        print(f"{'─' * W}")
 
-        # --- Tokio ---
-        print(f"  Starting tokio-echo on :{TOKIO_PORT}...", end=" ", flush=True)
-        tokio_proc = start_server(tokio_bin, TOKIO_PORT)
-        print("OK")
+        test_results = {}
 
-        print(f"  Running test against Tokio...", end=" ", flush=True)
-        tokio_m = run_test(TOKIO_PORT, threads, messages, size)
-        status = "PASS" if tokio_m.get("pass") else "FAIL"
-        print(f"{status} ({tokio_m.get('msg_per_sec', 0):,.0f} msg/s)")
+        for name, binary, port, _ in SERVERS:
+            print(f"  Starting {name:<6} on :{port}...", end=" ", flush=True)
+            proc = start_server(binary, port)
+            print("OK", end="  ")
 
-        stop_server(tokio_proc)
-        time.sleep(0.3)  # let port release
+            print(f"Running...", end=" ", flush=True)
+            m = run_test(port, threads, messages, size)
+            status = "PASS" if m.get("pass") else "FAIL"
+            print(f"{status}  {m.get('msg_per_sec', 0):>10,.0f} msg/s  "
+                  f"p50={m.get('lat_p50', 0):.2f}ms  p99={m.get('lat_p99', 0):.2f}ms")
 
-        # --- KSVC ---
-        print(f"  Starting ksvc-echo on :{KSVC_PORT}...", end=" ", flush=True)
-        ksvc_proc = start_server(ksvc_bin, KSVC_PORT)
-        print("OK")
+            stop_server(proc)
+            time.sleep(0.3)
+            test_results[name] = m
 
-        print(f"  Running test against KSVC...", end=" ", flush=True)
-        ksvc_m = run_test(KSVC_PORT, threads, messages, size)
-        status = "PASS" if ksvc_m.get("pass") else "FAIL"
-        print(f"{status} ({ksvc_m.get('msg_per_sec', 0):,.0f} msg/s)")
+        all_results.append((label, test_results))
 
-        stop_server(ksvc_proc)
-        time.sleep(0.3)
-
-        all_results.append((label, ksvc_m, tokio_m))
-
-    # ── Summary table ──
-    print(f"\n{'=' * 78}")
-    print(f"  RESULTS SUMMARY")
-    print(f"{'=' * 78}")
+    # ── Summary: Throughput ──
+    print(f"\n{'=' * W}")
+    print(f"  THROUGHPUT (msg/s) — higher is better")
+    print(f"{'=' * W}")
     print()
-    print(f"  {'Test':<38} {'Tokio':>10} {'KSVC':>10} {'Ratio':>8} {'Winner':>8}")
-    print(f"  {'─' * 38} {'─' * 10} {'─' * 10} {'─' * 8} {'─' * 8}")
+    hdr = f"  {'Test':<22} {'Go':>12} {'Tokio':>12} {'KSVC':>12}  {'Best':>6}"
+    print(hdr)
+    print(f"  {'─' * 22} {'─' * 12} {'─' * 12} {'─' * 12}  {'─' * 6}")
 
-    for label, ksvc_m, tokio_m in all_results:
+    for label, results in all_results:
         short = label.split(":")[0].strip()
+        g = results.get("Go", {}).get("msg_per_sec", 0)
+        t = results.get("Tokio", {}).get("msg_per_sec", 0)
+        k = results.get("KSVC", {}).get("msg_per_sec", 0)
+        vals = {"Go": g, "Tokio": t, "KSVC": k}
+        best = max(vals, key=vals.get)
+        print(f"  {short:<22} {g:>12,.0f} {t:>12,.0f} {k:>12,.0f}  {best:>6}")
 
-        # Throughput
-        t_tput = tokio_m.get("msg_per_sec", 0)
-        k_tput = ksvc_m.get("msg_per_sec", 0)
-        ratio = fmt_ratio(k_tput, t_tput)
-        winner = "KSVC" if k_tput > t_tput else "Tokio"
-        print(f"  {short + ' msg/s':<38} {t_tput:>10,.0f} {k_tput:>10,.0f} {ratio:>8} {winner:>8}")
-
+    # ── Summary: Latency p99 ──
     print()
-    print(f"  {'Latency (p99)':<38} {'Tokio':>10} {'KSVC':>10} {'Ratio':>8} {'Winner':>8}")
-    print(f"  {'─' * 38} {'─' * 10} {'─' * 10} {'─' * 8} {'─' * 8}")
+    print(f"{'=' * W}")
+    print(f"  LATENCY p99 (ms) — lower is better")
+    print(f"{'=' * W}")
+    print()
+    hdr = f"  {'Test':<22} {'Go':>12} {'Tokio':>12} {'KSVC':>12}  {'Best':>6}"
+    print(hdr)
+    print(f"  {'─' * 22} {'─' * 12} {'─' * 12} {'─' * 12}  {'─' * 6}")
 
-    for label, ksvc_m, tokio_m in all_results:
+    for label, results in all_results:
         short = label.split(":")[0].strip()
-        t_p99 = tokio_m.get("lat_p99", 0)
-        k_p99 = ksvc_m.get("lat_p99", 0)
-        # For latency, lower is better — ratio < 1 means KSVC wins
-        ratio = fmt_ratio(k_p99, t_p99) if t_p99 > 0 else "N/A"
-        winner = "KSVC" if k_p99 < t_p99 else "Tokio"
-        print(f"  {short:<38} {t_p99:>9.2f}ms {k_p99:>9.2f}ms {ratio:>8} {winner:>8}")
+        g = results.get("Go", {}).get("lat_p99", 999)
+        t = results.get("Tokio", {}).get("lat_p99", 999)
+        k = results.get("KSVC", {}).get("lat_p99", 999)
+        vals = {"Go": g, "Tokio": t, "KSVC": k}
+        best = min(vals, key=vals.get)
+        print(f"  {short:<22} {g:>11.2f}ms {t:>11.2f}ms {k:>11.2f}ms  {best:>6}")
 
-    # Notes
-    print(f"\n{'─' * 78}")
-    print(f"  NOTES:")
-    print(f"  • Tokio: multi-threaded runtime, epoll, task-per-connection")
-    print(f"  • KSVC:  single-threaded, io_uring, event loop with 50μs idle sleep")
-    print(f"  • Ratio = KSVC / Tokio (throughput: >1 = KSVC wins; latency: <1 = KSVC wins)")
-    print(f"  • Known KSVC bottleneck: 50μs sleep when idle, vs Tokio's epoll_wait()")
-    print(f"  • Fix: replace sleep with io_uring_enter(min_complete=1) — ~3-5x improvement")
-    print(f"{'─' * 78}")
+    # ── Summary: Latency p50 ──
+    print()
+    print(f"{'=' * W}")
+    print(f"  LATENCY p50 (ms) — lower is better")
+    print(f"{'=' * W}")
+    print()
+    hdr = f"  {'Test':<22} {'Go':>12} {'Tokio':>12} {'KSVC':>12}  {'Best':>6}"
+    print(hdr)
+    print(f"  {'─' * 22} {'─' * 12} {'─' * 12} {'─' * 12}  {'─' * 6}")
+
+    for label, results in all_results:
+        short = label.split(":")[0].strip()
+        g = results.get("Go", {}).get("lat_p50", 999)
+        t = results.get("Tokio", {}).get("lat_p50", 999)
+        k = results.get("KSVC", {}).get("lat_p50", 999)
+        vals = {"Go": g, "Tokio": t, "KSVC": k}
+        best = min(vals, key=vals.get)
+        print(f"  {short:<22} {g:>11.2f}ms {t:>11.2f}ms {k:>11.2f}ms  {best:>6}")
+
+    # ── Architecture notes ──
+    print(f"\n{'─' * W}")
+    print(f"  ARCHITECTURE:")
+    print(f"  Go:    goroutine-per-conn, netpoller (epoll), M:N scheduling")
+    print(f"  Tokio: task-per-conn, multi-threaded, epoll (mio)")
+    print(f"  KSVC:  single-threaded, io_uring, event loop (flush_and_wait)")
+    print(f"")
+    print(f"  SYSCALLS PER ECHO (steady state):")
+    print(f"  Go:    epoll_wait + read + write per msg  (3 syscalls)")
+    print(f"  Tokio: epoll_ctl + epoll_wait + read + write  (3-4 syscalls)")
+    print(f"  KSVC:  io_uring_enter per BATCH  (1 syscall for N msgs)")
+    print(f"{'─' * W}")
 
 
 if __name__ == "__main__":
