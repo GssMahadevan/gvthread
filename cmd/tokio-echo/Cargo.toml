@@ -1,0 +1,15 @@
+[package]
+name = "tokio-echo"
+description = "TCP echo server — idiomatic Tokio, for comparison with ksvc-echo"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "tokio-echo"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }

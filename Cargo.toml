@@ -21,6 +21,8 @@ members = [
     "cmd/benchmark",
     "cmd/playground",
     "cmd/ksvc-smoke",
+    "cmd/ksvc-echo" ,
+    "cmd/tokio-echo" ,
 
 ]
 

@@ -62,6 +62,7 @@ impl BasicIoUring {
     /// Probe supported opcodes via IORING_REGISTER_PROBE.
     pub fn probe_opcodes_static(&self) -> Vec<u8> {
         let mut probe = io_uring::Probe::new();
+        // Register probe with the kernel to discover supported opcodes
         if self.ring.submitter().register_probe(&mut probe).is_err() {
             eprintln!("ksvc: IORING_REGISTER_PROBE failed, Tier 1 disabled");
             return Vec::new();
@@ -422,5 +423,22 @@ impl IoBackend for BasicIoUring {
 impl BasicIoUring {
     pub fn submit_with_opcode(&mut self, entry: &SubmitEntry, opcode: u8) -> Result<()> {
         self.translate_and_push(entry, opcode)
+    }
+
+    /// Flush pending SQEs AND block until at least `min_complete` CQEs are ready.
+    ///
+    /// This is the key performance method. Instead of:
+    ///   flush() → poll() → sleep(50μs)  // wastes 50μs per idle cycle
+    /// Use:
+    ///   flush_and_wait(1)                // blocks in kernel, wakes instantly on CQE
+    ///
+    /// Under the hood: io_uring_enter(to_submit, min_complete, IORING_ENTER_GETEVENTS)
+    /// The kernel blocks the calling thread until a CQE is available — zero CPU waste.
+    pub fn flush_and_wait(&mut self, min_complete: usize) -> Result<usize> {
+        let submitted = self.ring.submit_and_wait(min_complete)
+            .map_err(|e| KsvcError::IoUringSubmit(e.raw_os_error().unwrap_or(-1)))?;
+        self.inflight += submitted;
+        self.pending_submit = 0;
+        Ok(submitted)
     }
 }
