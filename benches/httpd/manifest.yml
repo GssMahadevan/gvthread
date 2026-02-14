@@ -2,21 +2,21 @@
 #
 # Common section is LAW: every app gets identical common params.
 # App config is ADDITIVE: only runtime-specific knobs.
+# Port is PER-APP: avoids TCP TIME_WAIT between sequential runs.
 #
 # bench-runner exports:
 #   common keys  → gvt_{K}={V}
-#   app keys     → gvt_app_{K}={V}
+#   app keys     → gvt_app_{K}={V}     (includes gvt_app_port)
 #
 # Apps read gvt_parallelism for threads/workers/GOMAXPROCS.
-# Apps read gvt_port for listen port.
+# Apps read gvt_app_port for listen port.
 # taskset enforces gvt_cpu_cores externally.
 
 common:
   light:
     desc: "Quick sanity — laptop / CI"
-    cpu_cores: 2
+    # cpu_cores: 2
     parallelism: 2
-    port: 8080
     warmup_sec: 2
     measure_sec: 5
     keepalive: true
@@ -25,9 +25,8 @@ common:
 
   medium:
     desc: "Dev VM — moderate load"
-    cpu_cores: 4
+    # cpu_cores: 4
     parallelism: 4
-    port: 8080
     warmup_sec: 3
     measure_sec: 10
     keepalive: true
@@ -36,9 +35,8 @@ common:
 
   heavy:
     desc: "Bare metal — saturate 8 cores"
-    cpu_cores: 8
+    # cpu_cores: 8
     parallelism: 8
-    port: 8080
     warmup_sec: 5
     measure_sec: 30
     keepalive: true
@@ -47,9 +45,8 @@ common:
 
   nokeep:
     desc: "Connection-per-request storm (4 cores)"
-    cpu_cores: 4
+    # cpu_cores: 4
     parallelism: 4
-    port: 8080
     warmup_sec: 3
     measure_sec: 10
     keepalive: false
@@ -60,6 +57,7 @@ apps:
   ksvc-httpd:
     lang: rust
     binary: target/release/ksvc-httpd
+    port: 8080
     model: event-loop
     io: io_uring
     configs:
@@ -70,6 +68,7 @@ apps:
   gvthread-httpd:
     lang: rust
     binary: target/release/gvthread-httpd
+    port: 8081
     model: green-thread
     io: io_uring
     configs:
@@ -81,6 +80,7 @@ apps:
   tokio-httpd:
     lang: rust
     binary: target/release/tokio-httpd
+    port: 8082
     model: async-await
     io: epoll
     configs:
@@ -89,6 +89,7 @@ apps:
   go-httpd:
     lang: go
     binary: cmd/httpd/go/httpd
+    port: 8083
     model: goroutine
     io: epoll
     configs:

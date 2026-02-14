@@ -11,6 +11,7 @@
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use std::env;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -191,7 +192,9 @@ async fn handle_client(
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let mut port: u16 = 8081;
+    let mut port: u16 = env::var("gvt_app_port").ok()
+         .and_then(|v| v.parse().ok())
+      .unwrap_or(8080);
     let mut serve_dir: Option<String> = None;
 
     let mut i = 1;

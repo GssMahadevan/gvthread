@@ -21,6 +21,7 @@ use ksvc_core::router::SyscallRouter;
 use ksvc_module::basic_iouring::{BasicIoUring, BasicIoUringConfig};
 use ksvc_module::probe_router::ProbeRouter;
 
+use std::env;
 use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -649,7 +650,9 @@ fn worker_loop(wid: usize, num_workers: usize, port: u16, max_conns: usize,
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let mut port: u16 = 8080;
+    let mut port: u16 = env::var("gvt_app_port").ok()
+         .and_then(|v| v.parse().ok())
+      .unwrap_or(8080);;
     let mut serve_dir: Option<String> = None;
     let mut max_conns: usize = 4096;
     let mut num_threads: usize = 1;

@@ -8,8 +8,9 @@ exports gvt_* / gvt_app_* env vars, runs wrk, collects results.
 Design principles:
   - Common section is LAW. Same for every app in a run. Cannot be overridden.
   - App config is ADDITIVE. Only knobs unique to that runtime/backend.
+  - Port is PER-APP (at app level, not common) to avoid TCP TIME_WAIT conflicts.
   - gvt_{K}={V}       for common params (enforced equal across apps)
-  - gvt_app_{K}={V}   for app-specific params
+  - gvt_app_{K}={V}   for app-specific params (includes port)
   - taskset enforces cpu_cores (apps don't do their own pinning)
   - parallelism is always common (threads/workers/GOMAXPROCS all read gvt_parallelism)
 
@@ -359,6 +360,20 @@ def load_manifest(path):
         log_err(f"Manifest missing 'apps' section: {path}")
         sys.exit(1)
 
+    # Guard: port must NOT be in common (it's per-app to avoid TIME_WAIT)
+    for profile_name, profile in manifest["common"].items():
+        if isinstance(profile, dict) and "port" in profile:
+            log_err(f"'port' found in common/{profile_name}. "
+                    f"Port must be per-app (avoids TCP TIME_WAIT between runs).")
+            sys.exit(1)
+
+    # Guard: every app must have a port
+    for app_name, app_def in manifest["apps"].items():
+        if isinstance(app_def, dict) and "port" not in app_def:
+            log_err(f"App '{app_name}' missing 'port'. "
+                    f"Each app needs its own port to avoid TIME_WAIT conflicts.")
+            sys.exit(1)
+
     return manifest
 
 
@@ -439,7 +454,14 @@ def run_one_cell(
     # ── Build env ──
     env = build_env(common_profile, app_config)
 
-    port = common_profile.get("port", 8080)
+    # Port is per-app (avoids TCP TIME_WAIT between sequential runs)
+    port = app_def.get("port")
+    if port is None:
+        log_err(f"[{cell_tag}] No 'port' in app definition. "
+                f"Each app must have its own port to avoid TIME_WAIT conflicts.")
+        return None
+    env["gvt_app_port"] = str(port)
+
     cpu_cores = common_profile.get("cpu_cores")
     parallelism = common_profile.get("parallelism")
     warmup_sec = common_profile.get("warmup_sec", 3)
@@ -466,6 +488,7 @@ def run_one_cell(
     log(f"  Config: {config_name} — "
         f"{', '.join(f'{k}={v}' for k, v in app_config.items() if k != 'name') or '(defaults)'}")
     log(f"  HW:     cores={cpu_cores}, parallelism={parallelism}")
+    log(f"  Port:   {port} (per-app, avoids TIME_WAIT)")
     log(f"  Load:   wrk -t{wrk_threads} -c{wrk_connections} -d{measure_sec}s "
         f"{'(keepalive)' if keepalive else '(no keepalive)'}")
     log(f"  Binary: {binary_path}")
@@ -895,10 +918,11 @@ Examples:
         for app_name, app_def in apps.items():
             configs = app_def.get("configs", [{"name": "default"}])
             config_names = [c.get("name", "default") for c in configs]
+            port = app_def.get("port", "?")
             print(f"  {app_name:<20} lang={app_def.get('lang', '?'):<6} "
                   f"model={app_def.get('model', '?'):<14} "
                   f"io={app_def.get('io', '?'):<10} "
-                  f"configs={config_names}")
+                  f"port={port:<6} configs={config_names}")
 
         print(f"\nExecution matrix:")
         for cname in common_profiles:

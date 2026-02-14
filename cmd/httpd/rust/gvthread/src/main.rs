@@ -29,6 +29,7 @@ use gvthread::{Runtime, SchedulerConfig, spawn, Priority};
 use ksvc_gvthread::{Reactor, ReactorConfig, GvtListener, GvtStream};
 use ksvc_gvthread::reactor::ReactorShared;
 
+use std::env;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -190,11 +191,15 @@ fn stats_loop() {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let mut port: u16 = 8080;
+    let mut port: u16 = env::var("gvt_app_port").ok()
+         .and_then(|v| v.parse().ok())
+      .unwrap_or(8080);
+
     let mut num_workers: usize = 4;
     let mut max_gvthreads: usize = 100_000;
     let mut sq_entries: u32 = 1024;
 
+    eprintln!("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ appPort-1={}", port);
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -221,7 +226,7 @@ fn main() {
         }
         i += 1;
     }
-
+    eprintln!("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ appPort-2={}", port);
     unsafe {
         libc::signal(libc::SIGINT, handle_sigint as usize);
         libc::signal(libc::SIGTERM, handle_sigint as usize);
