@@ -92,3 +92,6 @@ vgcore.*
 *.tar.xz
 *.7z
 main
+# Go binaries (built into source dirs by itest plugins)
+cmd/*/go/*-server
+cmd/*/go/main

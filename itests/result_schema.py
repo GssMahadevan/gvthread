@@ -141,10 +141,19 @@ def print_comparison_table(results: dict, test_type: str):
             if t["name"] not in all_names:
                 all_names.append(t["name"])
 
+    # Check if any result has latency data
+    has_latency = any(
+        t.get("p99_us") is not None
+        for r in results.values()
+        for t in r.tests
+    )
+
     # Header
-    hdr = f"{'Test':<25}"
+    hdr = f"{'Test':<20}"
     for s in servers:
-        hdr += f"  {s:>12} req/s"
+        hdr += f"  {s:>10} req/s"
+        if has_latency:
+            hdr += f"  {'p99':>7}"
     print(f"\n{'='*len(hdr)}")
     print(f"  {test_type.upper()} Benchmark Comparison")
     print(f"{'='*len(hdr)}")
@@ -153,13 +162,23 @@ def print_comparison_table(results: dict, test_type: str):
 
     # Rows
     for name in all_names:
-        row = f"{name:<25}"
+        row = f"{name:<20}"
         vals = {}
         for s in servers:
             by_name = {t["name"]: t for t in results[s].tests}
-            v = by_name.get(name, {}).get("throughput_rps")
+            t = by_name.get(name, {})
+            v = t.get("throughput_rps")
+            p99 = t.get("p99_us")
             vals[s] = v
-            row += f"  {v:>12,.0f}    " if v else f"  {'N/A':>12}    "
+            if v:
+                row += f"  {v:>10,.0f}     "
+            else:
+                row += f"  {'N/A':>10}     "
+            if has_latency:
+                if p99:
+                    row += f"  {p99:>6,.0f}μ"
+                else:
+                    row += f"  {'—':>7}"
         # Winner
         valid = {s: v for s, v in vals.items() if v}
         if valid:
