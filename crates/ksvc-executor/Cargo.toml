@@ -1,0 +1,13 @@
+[package]
+name = "ksvc-executor"
+description = "KSVC dispatcher loop — reads submit ring, routes to io_uring/workers, writes completions"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ksvc-core = { path = "../ksvc-core" }
+ksvc-module = { path = "../ksvc-module" }
+libc = { workspace = true }

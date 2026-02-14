@@ -1,0 +1,22 @@
+[package]
+name = "ksvc-module"
+description = "KSVC default implementations — BasicIoUring, FixedPool, EventFdNotifier, MmapSharedPage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+sqpoll = ["ksvc-core/sqpoll"]
+fixed-files = ["ksvc-core/fixed-files"]
+fixed-buffers = ["ksvc-core/fixed-buffers"]
+multishot-accept = ["ksvc-core/multishot-accept"]
+
+[dependencies]
+ksvc-core = { path = "../ksvc-core" }
+io-uring = { workspace = true }
+nix = { workspace = true }
+libc = { workspace = true }
+crossbeam-queue = { workspace = true }

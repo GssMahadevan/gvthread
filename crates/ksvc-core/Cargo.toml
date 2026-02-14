@@ -1,0 +1,19 @@
+[package]
+name = "ksvc-core"
+description = "KSVC trait definitions — syscall routing, I/O backend, worker pool, completion"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+sqpoll = []
+fixed-files = []
+fixed-buffers = []
+multishot-accept = []
+send-zc = []
+
+[dependencies]
+# Zero external dependencies — pure trait crate

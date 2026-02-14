@@ -1,0 +1,26 @@
+# ── KSVC kernel module targets ──
+# Add these targets to the existing gvthread/Makefile
+
+.PHONY: kmod kmod-install kmod-uninstall kmod-reload kmod-test kmod-clean
+
+kmod:
+	$(MAKE) -C kmod
+
+kmod-install: kmod
+	sudo insmod kmod/ksvc.ko ksvc_debug=1
+
+kmod-uninstall:
+	-sudo rmmod ksvc
+
+kmod-reload: kmod-uninstall kmod-install
+
+kmod-test: kmod
+	$(CC) -Wall -O2 -o kmod/test/test_basic kmod/test/test_basic.c
+	sudo kmod/test/test_basic
+
+kmod-clean:
+	$(MAKE) -C kmod clean
+
+# Full build: Rust workspace + kernel module
+all-ksvc: kmod
+	cargo build --workspace
