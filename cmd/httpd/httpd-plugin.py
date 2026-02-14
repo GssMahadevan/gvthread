@@ -71,52 +71,68 @@ def _check_wrk():
     return shutil.which("wrk") is not None
 
 
+def _parse_latency_value(val_str, unit_str):
+    """Convert wrk latency value + unit to microseconds."""
+    val = float(val_str)
+    if unit_str == "ms":
+        val *= 1000
+    elif unit_str == "s":
+        val *= 1_000_000
+    # "us" stays as-is
+    return val
+
+
 def _parse_wrk_output(output: str) -> dict:
     """
-    Parse wrk output for throughput and latency.
-    Example wrk output:
-        Latency    42.13us  120.51us   1.53ms   87.60%
+    Parse wrk output for throughput and latency distribution.
+
+    wrk --latency output format:
+        Latency Distribution
+           50%   42.13us
+           75%   85.20us
+           90%  150.33us
+           99%    1.53ms
+        Latency    45.12us  120.51us   1.53ms   87.60%
         Req/Sec   115.18k    10.19k  135.46k    70.00%
         229906 requests in 10.00s, ...
         Requests/sec: 229906.12
         Transfer/sec:     27.21MB
     """
-    result = {"throughput_rps": 0, "avg_latency_us": 0, "p99_us": 0}
+    result = {
+        "throughput_rps": 0,
+        "avg_us": None,
+        "p50_us": None,
+        "p75_us": None,
+        "p90_us": None,
+        "p99_us": None,
+        "errors": 0,
+    }
 
     # Requests/sec line
     m = re.search(r"Requests/sec:\s+([\d.]+)", output)
     if m:
         result["throughput_rps"] = float(m.group(1))
 
-    # Latency line (avg)
-    m = re.search(r"Latency\s+([\d.]+)(us|ms|s)", output)
-    if m:
-        val = float(m.group(1))
-        unit = m.group(2)
-        if unit == "ms":
-            val *= 1000
-        elif unit == "s":
-            val *= 1_000_000
-        result["avg_latency_us"] = val
+    # Latency Distribution percentiles (from --latency flag)
+    pct_pattern = re.compile(r"(\d+)%\s+([\d.]+)(us|ms|s)")
+    pct_map = {"50": "p50_us", "75": "p75_us", "90": "p90_us", "99": "p99_us"}
+    for m in pct_pattern.finditer(output):
+        pct = m.group(1)
+        if pct in pct_map:
+            result[pct_map[pct]] = _parse_latency_value(m.group(2), m.group(3))
 
-    # Try to find latency distribution if --latency flag was used
-    # 99%   1.53ms
-    m = re.search(r"99%\s+([\d.]+)(us|ms|s)", output)
+    # Avg latency from the summary "Latency  avg  stdev  max  +/- stdev" line
+    m = re.search(r"Latency\s+([\d.]+)(us|ms|s)\s+([\d.]+)(us|ms|s)", output)
     if m:
-        val = float(m.group(1))
-        unit = m.group(2)
-        if unit == "ms":
-            val *= 1000
-        elif unit == "s":
-            val *= 1_000_000
-        result["p99_us"] = val
+        result["avg_us"] = _parse_latency_value(m.group(1), m.group(2))
 
     # Socket errors
-    m = re.search(r"Socket errors:.*?(\d+) connect.*?(\d+) read.*?(\d+) write.*?(\d+) timeout", output)
+    m = re.search(
+        r"Socket errors:.*?(\d+) connect.*?(\d+) read.*?(\d+) write.*?(\d+) timeout",
+        output,
+    )
     if m:
         result["errors"] = sum(int(x) for x in m.groups())
-    else:
-        result["errors"] = 0
 
     return result
 
@@ -136,28 +152,37 @@ def _run_wrk(port: int, scenario: dict) -> dict:
 
 
 def _run_python_http_bench(port: int, scenario: dict) -> dict:
-    """Fallback: simple Python HTTP benchmark (much lower throughput than wrk)."""
+    """Fallback: Python HTTP benchmark with latency tracking."""
     import urllib.request
     import threading
 
-    total_count = 0
-    total_errors = 0
     lock = threading.Lock()
+    all_results = []  # list of {count, errors, latencies_ns}
     end_time = time.monotonic() + scenario["duration_s"]
 
     def worker():
-        nonlocal total_count, total_errors
         count = 0
         errors = 0
+        latencies_ns = []
+        sample_every = 1
         while time.monotonic() < end_time:
+            record = (count % sample_every == 0)
             try:
+                if record:
+                    t0 = time.perf_counter_ns()
                 urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5)
                 count += 1
+                if record:
+                    latencies_ns.append(time.perf_counter_ns() - t0)
             except Exception:
                 errors += 1
+            # Adjust sampling after warmup
+            if count == 500 and scenario["duration_s"] > 0:
+                elapsed = time.monotonic() - (end_time - scenario["duration_s"])
+                est_total = (500 / max(elapsed, 0.001)) * scenario["duration_s"]
+                sample_every = max(1, int(est_total / 5000))
         with lock:
-            total_count += count
-            total_errors += errors
+            all_results.append({"count": count, "errors": errors, "latencies_ns": latencies_ns})
 
     threads = []
     for _ in range(min(scenario["connections"], 50)):
@@ -167,11 +192,32 @@ def _run_python_http_bench(port: int, scenario: dict) -> dict:
     for t in threads:
         t.join(timeout=scenario["duration_s"] + 10)
 
+    total_count = sum(r["count"] for r in all_results)
+    total_errors = sum(r["errors"] for r in all_results)
+    all_latencies = []
+    for r in all_results:
+        all_latencies.extend(r["latencies_ns"])
+
+    pcts = _compute_percentiles(all_latencies)
     return {
-        "throughput_rps": total_count / scenario["duration_s"],
+        "throughput_rps": total_count / scenario["duration_s"] if scenario["duration_s"] > 0 else 0,
         "errors": total_errors,
-        "avg_latency_us": 0,
-        "p99_us": 0,
+        **pcts,
+    }
+
+
+def _compute_percentiles(all_latencies_ns):
+    """Compute p50, p75, p90, p99, avg from nanosecond latencies."""
+    if not all_latencies_ns:
+        return {"p50_us": None, "p75_us": None, "p90_us": None, "p99_us": None, "avg_us": None}
+    s = sorted(all_latencies_ns)
+    n = len(s)
+    return {
+        "p50_us": s[int(n * 0.50)] / 1000.0,
+        "p75_us": s[int(n * 0.75)] / 1000.0,
+        "p90_us": s[int(n * 0.90)] / 1000.0,
+        "p99_us": s[min(int(n * 0.99), n - 1)] / 1000.0,
+        "avg_us": (sum(s) / n) / 1000.0,
     }
 
 
@@ -199,7 +245,7 @@ def run_bench(server_name: str, port: int, wrk_threads: int = 2, **kwargs) -> Te
         m = MetricResult(
             name=scenario["name"],
             throughput_rps=bench["throughput_rps"],
-            p50_us=bench.get("avg_latency_us"),
+            p50_us=bench.get("p50_us"),
             p99_us=bench.get("p99_us"),
             duration_s=scenario["duration_s"],
             threads=1 if server_name == "ksvc" else 0,
@@ -208,11 +254,16 @@ def run_bench(server_name: str, port: int, wrk_threads: int = 2, **kwargs) -> Te
                 "connections": scenario["connections"],
                 "errors": bench.get("errors", 0),
                 "client": "wrk" if has_wrk else "python",
+                "p75_us": bench.get("p75_us"),
+                "p90_us": bench.get("p90_us"),
+                "avg_us": bench.get("avg_us"),
             },
         )
         result.add_metric(m)
+        p50 = bench.get("p50_us")
+        p99 = bench.get("p99_us")
+        lat_str = f"p50={p50:,.0f}μs p99={p99:,.0f}μs" if p50 and p99 else "no latency data"
         print(f"    [{server_name}]   {bench['throughput_rps']:,.0f} req/s  "
-              f"p99={bench.get('p99_us', 0):.0f}μs  "
-              f"({bench.get('errors', 0)} errors)")
+              f"{lat_str}  ({bench.get('errors', 0)} errors)")
 
     return result
