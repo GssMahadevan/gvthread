@@ -425,6 +425,26 @@ def build_env(common_profile, app_config):
     return env
 
 
+def _dump_server_output(server_proc, cell_tag):
+    """Read and display any buffered stdout/stderr from a server process."""
+    try:
+        # Non-blocking read of whatever's available
+        # If process is dead, read() returns everything buffered
+        stdout = server_proc.stdout.read().decode(errors="replace") if server_proc.stdout else ""
+        stderr = server_proc.stderr.read().decode(errors="replace") if server_proc.stderr else ""
+    except Exception:
+        stdout = stderr = ""
+
+    if stderr:
+        log_err(f"  [{cell_tag}] Server stderr:")
+        for line in stderr.strip().splitlines()[-20:]:  # last 20 lines
+            log_err(f"    {line}")
+    if stdout:
+        log(f"  [{cell_tag}] Server stdout:")
+        for line in stdout.strip().splitlines()[-10:]:  # last 10 lines
+            log(f"    {line}")
+
+
 # ---------------------------------------------------------------------------
 # Core: single benchmark cell
 # ---------------------------------------------------------------------------
@@ -535,16 +555,26 @@ def run_one_cell(
     # Wait for port to open
     if not wait_for_port(port, timeout=10.0):
         log_err(f"[{cell_tag}] Server did not open port {port} within 10s")
-        stderr = server_proc.stderr.read().decode(errors="replace")
-        if stderr:
-            log_err(f"  Server stderr (last 500 chars): ...{stderr[-500:]}")
-        server_proc.kill()
-        server_proc.wait()
+        rc = server_proc.poll()
+        if rc is not None:
+            sig_name = ""
+            if rc < 0:
+                import signal as sig_mod
+                try:
+                    sig_name = f" ({sig_mod.Signals(-rc).name})"
+                except (ValueError, AttributeError):
+                    sig_name = f" (signal {-rc})"
+            log_err(f"  Server CRASHED during startup (exit={rc}{sig_name})")
+        _dump_server_output(server_proc, cell_tag)
+        if server_proc.poll() is None:
+            server_proc.kill()
+            server_proc.wait()
         return None
 
     log(f"  Server ready (pid={server_proc.pid})")
 
     result = None
+    server_output_dumped = False
     try:
         # ── Warmup ──
         if warmup_sec > 0:
@@ -561,6 +591,21 @@ def run_one_cell(
                 wrk_warmup,
                 capture_output=True, text=True, timeout=warmup_sec + 30,
             )
+
+        # ── Check server survived warmup ──
+        rc = server_proc.poll()
+        if rc is not None:
+            sig_name = ""
+            if rc < 0:
+                import signal as sig_mod
+                try:
+                    sig_name = f" ({sig_mod.Signals(-rc).name})"
+                except (ValueError, AttributeError):
+                    sig_name = f" (signal {-rc})"
+            log_err(f"[{cell_tag}] Server CRASHED during warmup (exit={rc}{sig_name})")
+            _dump_server_output(server_proc, cell_tag)
+            server_output_dumped = True
+            return None
 
         # ── Measurement ──
         log(f"  Measuring ({measure_sec}s) ...")
@@ -589,6 +634,19 @@ def run_one_cell(
             log_err(f"[{cell_tag}] wrk failed (rc={wrk_result.returncode})")
             if wrk_stderr:
                 log_err(f"  wrk stderr: {wrk_stderr[:300]}")
+            # Check if server died during measurement
+            rc = server_proc.poll()
+            if rc is not None:
+                sig_name = ""
+                if rc < 0:
+                    import signal as sig_mod
+                    try:
+                        sig_name = f" ({sig_mod.Signals(-rc).name})"
+                    except (ValueError, AttributeError):
+                        sig_name = f" (signal {-rc})"
+                log_err(f"  Server CRASHED during measurement (exit={rc}{sig_name})")
+            _dump_server_output(server_proc, cell_tag)
+            server_output_dumped = True
             return None
 
         # Parse wrk output
@@ -660,19 +718,36 @@ def run_one_cell(
         traceback.print_exc()
     finally:
         # ── Stop server ──
-        log(f"  Stopping server (pid={server_proc.pid}) ...")
-        try:
-            server_proc.send_signal(signal.SIGTERM)
-            server_proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            server_proc.kill()
-            server_proc.wait()
+        rc = server_proc.poll()
+        if rc is not None:
+            # Already dead (crash or natural exit)
+            sig_name = ""
+            if rc < 0:
+                import signal as sig_mod
+                try:
+                    sig_name = f" ({sig_mod.Signals(-rc).name})"
+                except (ValueError, AttributeError):
+                    sig_name = f" (signal {-rc})"
+            log(f"  Server already exited (code={rc}{sig_name})")
+            if result is None and not server_output_dumped:
+                _dump_server_output(server_proc, cell_tag)
+        else:
+            log(f"  Stopping server (pid={server_proc.pid}) ...")
+            try:
+                server_proc.send_signal(signal.SIGTERM)
+                server_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                server_proc.kill()
+                server_proc.wait()
 
-        # Capture server stderr for diagnostics
-        server_stderr = server_proc.stderr.read().decode(errors="replace")
-        if result and server_stderr:
-            # Keep last 2K of server stderr (stats, diagnostics)
-            result["server_stderr"] = server_stderr[-2048:]
+        # Capture server stderr for result record (successful runs)
+        if result is not None and not server_output_dumped:
+            try:
+                server_stderr = server_proc.stderr.read().decode(errors="replace")
+                if server_stderr:
+                    result["server_stderr"] = server_stderr[-2048:]
+            except Exception:
+                pass
 
     return result
 
