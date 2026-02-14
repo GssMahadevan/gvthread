@@ -19,9 +19,11 @@ ksvc-gvthread = { path = "../../../../crates/ksvc-gvthread" }
 libc.workspace = true
 
 [profile.release]
-opt-level = 3
-lto = true
-codegen-units = 1
+#opt-level = 3
+#lto = true
+#codegen-units = 1
+debug = 1
+
 
 [profile.dev]
 opt-level = 1

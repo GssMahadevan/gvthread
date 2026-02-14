@@ -25,7 +25,9 @@ pub unsafe fn init_context(
     let sp = stack_top as usize;
     
     // Align stack to 16 bytes, then subtract 8 for the "call" alignment
-    let aligned_sp = (sp & !0xF) - 8;
+    // let aligned_sp = (sp & !0xF) - 8;  // BUG-2
+    let aligned_sp = sp & !0xF;
+
     
     // Set up initial register state
     let regs = &mut *regs;
