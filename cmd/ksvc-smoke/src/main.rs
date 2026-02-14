@@ -288,7 +288,7 @@ fn test_tier1(t: &mut TestRunner, inst: &mut ksvc_module::instance::DefaultInsta
 
     // C4: statx
     let route_sx = inst.router.route(nr::STATX);
-    let mut sxbuf: io_uring::types::statx = unsafe { std::mem::zeroed() };
+    let mut sxbuf: libc::statx = unsafe { std::mem::zeroed() };
     let entry_sx = SubmitEntry {
         corr_id: CorrId(3), syscall_nr: nr::STATX, flags: 0,
         args: [libc::AT_FDCWD as u64, c_path.as_ptr() as u64, 0, libc::STATX_SIZE as u64,
