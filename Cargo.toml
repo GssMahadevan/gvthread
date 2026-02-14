@@ -3,28 +3,11 @@ resolver = "2"
 
 members = [
     # Core crates
-    "crates/gvthread-core",
-    "crates/gvthread-runtime",
-    "crates/gvthread",
-    "crates/ksvc-core",
-    "crates/ksvc-module",
-    "crates/ksvc-executor",
-    
-    # Optional/future crates (uncomment when ready)
-    # "crates/gvthread-ipc",
-    
-    # Command-line tools and examples (Go-style cmd/)
-    "cmd/basic",
-    "cmd/channel",
-    "cmd/preemption",
-    "cmd/stress",
-    "cmd/benchmark",
-    "cmd/playground",
-    "cmd/ksvc-smoke",
-    "cmd/ksvc-echo" ,
-    "cmd/tokio-echo" ,
-    "cmd/ksvc-httpd" ,
-    "cmd/tokio-httpd" ,
+    "crates/*",
+    "cmd/*/rust/*",
+    "cmd/gvt/*",
+    "cmd/smoke/*",
+
 
 ]
 
