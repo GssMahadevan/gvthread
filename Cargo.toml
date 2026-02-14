@@ -23,6 +23,8 @@ members = [
     "cmd/ksvc-smoke",
     "cmd/ksvc-echo" ,
     "cmd/tokio-echo" ,
+    "cmd/ksvc-httpd" ,
+    "cmd/tokio-httpd" ,
 
 ]
 
