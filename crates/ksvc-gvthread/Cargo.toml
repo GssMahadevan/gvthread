@@ -1,0 +1,17 @@
+[package]
+name = "ksvc-gvthread"
+description = "Bridge: GVThread green threads + KSVC io_uring — blocking-style I/O on green threads"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gvthread-core.workspace = true
+gvthread-runtime.workspace = true
+gvthread.workspace = true
+ksvc-core.workspace = true
+ksvc-module.workspace = true
+libc.workspace = true
+crossbeam-queue.workspace = true

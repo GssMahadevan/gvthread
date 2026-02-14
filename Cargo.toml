@@ -36,6 +36,7 @@ gvthread = { path = "crates/gvthread" }
 ksvc-core = { path = "crates/ksvc-core" }
 ksvc-module = { path = "crates/ksvc-module" }
 ksvc-executor = { path = "crates/ksvc-executor" }
+ksvc-gvthread = { path = "crates/ksvc-gvthread" }
 
 # External dependencies (shared versions)
 libc = "0.2"
