@@ -296,8 +296,10 @@ fn test_tier1(t: &mut TestRunner, inst: &mut ksvc_module::instance::DefaultInsta
         .map(|c| c.result).unwrap_or(-1);
     t.check("statx completed", sx_ret == 0, &format!("ret={}", sx_ret));
     if sx_ret == 0 {
-        t.check(&format!("statx size={}", sxbuf.stx_size),
-            sxbuf.stx_size == test_data.len() as u64, &format!("expected {}", test_data.len()));
+        let stx_size = unsafe { *(&sxbuf as *const _ as *const libc::statx) }.stx_size;
+        t.check(&format!("statx size={}", stx_size),
+            stx_size == test_data.len() as u64, &format!("expected {}", test_data.len()));
+
     }
 
     // C5: close
