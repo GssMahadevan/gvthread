@@ -1,0 +1,19 @@
+[package]
+name = "ksvc-smoke"
+description = "KSVC end-to-end smoke test — exercises all tiers"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "ksvc-smoke"
+path = "src/main.rs"
+
+[dependencies]
+ksvc-core = { workspace = true }
+ksvc-module = { workspace = true }
+nix = { workspace = true }
+libc = { workspace = true }
+io-uring = { workspace = true }

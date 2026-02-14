@@ -20,6 +20,8 @@ members = [
     "cmd/stress",
     "cmd/benchmark",
     "cmd/playground",
+    "cmd/ksvc-smoke",
+
 ]
 
 [workspace.package]
