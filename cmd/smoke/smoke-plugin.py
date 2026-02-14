@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-ITESTS_DIR = Path(__file__).resolve().parent.parent / "itests"
+ITESTS_DIR = Path(__file__).resolve().parent.parent.parent / "itests"
 ROOT_DIR = ITESTS_DIR.parent
 sys.path.insert(0, str(ITESTS_DIR))
 from result_schema import TestResult, MetricResult

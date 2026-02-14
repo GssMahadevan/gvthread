@@ -15,7 +15,9 @@ import threading
 from pathlib import Path
 
 # Add itests/ to path for result_schema
-ITESTS_DIR = Path(__file__).resolve().parent.parent / "itests"
+# cmd/echo/echo-plugin.py → parent.parent.parent = repo root
+ROOT_DIR = Path(__file__).resolve().parent.parent.parent
+ITESTS_DIR = ROOT_DIR / "itests"
 sys.path.insert(0, str(ITESTS_DIR))
 from result_schema import TestResult, MetricResult
 
@@ -28,7 +30,7 @@ SERVERS = {
         "dir": "go",
         "build": "go build -o echo-server .",
         "cmd": "echo-server",
-        "args": lambda port: [f"-port={port}"],
+        "args": lambda port: [str(port)],
         "env": lambda port: {},
         "startup_wait_s": 0.5,
     },
@@ -37,8 +39,8 @@ SERVERS = {
         "build": "cargo build --release",
         "cargo_package": "tokio-echo",
         "cmd": "target/release/tokio-echo",
-        "args": lambda port: [f"--port={port}"],
-        "env": lambda port: {"PORT": str(port)},
+        "args": lambda port: [str(port)],
+        "env": lambda port: {},
         "startup_wait_s": 0.5,
     },
     "ksvc": {
@@ -46,8 +48,8 @@ SERVERS = {
         "build": "cargo build --release",
         "cargo_package": "ksvc-echo",
         "cmd": "target/release/ksvc-echo",
-        "args": lambda port: [f"--port={port}"],
-        "env": lambda port: {"PORT": str(port)},
+        "args": lambda port: [str(port)],
+        "env": lambda port: {},
         "startup_wait_s": 0.5,
     },
 }

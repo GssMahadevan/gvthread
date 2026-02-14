@@ -14,7 +14,9 @@ import sys
 import time
 from pathlib import Path
 
-ITESTS_DIR = Path(__file__).resolve().parent.parent / "itests"
+# cmd/httpd/httpd-plugin.py → parent.parent.parent = repo root
+ROOT_DIR = Path(__file__).resolve().parent.parent.parent
+ITESTS_DIR = ROOT_DIR / "itests"
 sys.path.insert(0, str(ITESTS_DIR))
 from result_schema import TestResult, MetricResult
 
@@ -26,7 +28,7 @@ SERVERS = {
         "dir": "go",
         "build": "go build -o httpd-server .",
         "cmd": "httpd-server",
-        "args": lambda port: [f"-port={port}"],
+        "args": lambda port: ["--port", str(port)],
         "env": lambda port: {},
         "startup_wait_s": 0.5,
     },
@@ -35,8 +37,8 @@ SERVERS = {
         "build": "cargo build --release",
         "cargo_package": "tokio-httpd",
         "cmd": "target/release/tokio-httpd",
-        "args": lambda port: [f"--port={port}"],
-        "env": lambda port: {"PORT": str(port)},
+        "args": lambda port: ["--port", str(port)],
+        "env": lambda port: {},
         "startup_wait_s": 0.5,
     },
     "ksvc": {
@@ -44,8 +46,8 @@ SERVERS = {
         "build": "cargo build --release",
         "cargo_package": "ksvc-httpd",
         "cmd": "target/release/ksvc-httpd",
-        "args": lambda port: [f"--port={port}"],
-        "env": lambda port: {"PORT": str(port)},
+        "args": lambda port: ["--port", str(port)],
+        "env": lambda port: {},
         "startup_wait_s": 0.5,
     },
 }
