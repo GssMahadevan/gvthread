@@ -1,0 +1,16 @@
+[package]
+name = "gerror"
+version = "0.1.0"
+edition = "2021"
+description = "Generic Error — zero-dep structured error with GlobalId codes"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+
+[features]
+default = []
+production = []     # strips message, file, line, metadata
+backtrace = []      # captures std::backtrace::Backtrace
+
+[dependencies]
+# Zero external dependencies by design.
+# Serialization (serde) is the consumer's responsibility.
