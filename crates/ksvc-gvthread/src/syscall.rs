@@ -268,8 +268,8 @@ fn submit_and_park_worker(syscall_nr: u32, args: [u64; 6]) -> i64 {
     assert!(!gvt_id.is_none(), "ksvc_syscall called outside GVThread");
     let slot = gvt_id.as_u32();
 
-    let worker_id = gvthread_runtime::tls::try_current_worker_id()
-        .expect("ksvc_syscall: not on a worker thread");
+    let worker_id = gvthread_runtime::worker::current_worker_id();
+    assert!(worker_id != usize::MAX, "ksvc_syscall: not on a worker thread");
 
     let pool = worker_reactor::global_pool();
 

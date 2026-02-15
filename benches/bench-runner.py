@@ -454,6 +454,7 @@ def run_one_cell(
     common_name, common_profile,
     bench_dir, system_info,
     dry_run=False,
+    build_profile="release",
 ):
     """
     Run one benchmark cell: one app × one config × one common profile.
@@ -495,6 +496,10 @@ def run_one_cell(
         log_err(f"[{cell_tag}] No binary specified")
         return None
 
+    # Rewrite binary path for build profile (release → debug)
+    if build_profile != "release":
+        binary = binary.replace("target/release/", f"target/{build_profile}/")
+
     # Resolve binary path relative to repo root
     binary_path = Path(ROOT_DIR) / binary if ROOT_DIR else Path(binary)
 
@@ -511,7 +516,7 @@ def run_one_cell(
     log(f"  Port:   {port} (per-app, avoids TIME_WAIT)")
     log(f"  Load:   wrk -t{wrk_threads} -c{wrk_connections} -d{measure_sec}s "
         f"{'(keepalive)' if keepalive else '(no keepalive)'}")
-    log(f"  Binary: {binary_path}")
+    log(f"  Binary: {binary_path} ({build_profile})")
 
     # Print exported env vars
     gvt_vars = sorted(k for k in env if k.startswith("gvt_"))
@@ -524,7 +529,7 @@ def run_one_cell(
     # ── Check binary exists ──
     if not binary_path.exists():
         log_err(f"[{cell_tag}] Binary not found: {binary_path}")
-        log_err(f"  Build it first (e.g. cargo build -p {app_name} --release)")
+        log_err(f"  Build it first (e.g. cargo build -p {app_name} --{build_profile})")
         return None
 
     # ── Check wrk exists ──
@@ -681,6 +686,7 @@ def run_one_cell(
             "model": app_def.get("model"),
             "io_backend": app_def.get("io"),
             "binary": str(binary_path),
+            "build_profile": build_profile,
 
             # Common params (every app got the same)
             "common_params": {k: v for k, v in common_profile.items() if k != "desc"},
@@ -922,6 +928,7 @@ Examples:
   %(prog)s benches/httpd/manifest.yml                         # all profiles × all apps
   %(prog)s benches/httpd/manifest.yml --common light          # one profile, all apps
   %(prog)s benches/httpd/manifest.yml --common heavy --app go-httpd
+  %(prog)s benches/httpd/manifest.yml --build debug           # use target/debug/ binaries
   %(prog)s benches/httpd/manifest.yml --list                  # show matrix
   %(prog)s benches/httpd/manifest.yml --dry-run               # plan only
         """,
@@ -935,6 +942,8 @@ Examples:
     parser.add_argument("--no-save", action="store_true", help="Don't save result JSON files")
     parser.add_argument("--no-report", action="store_true", help="Don't generate markdown reports")
     parser.add_argument("--repeat", type=int, default=1, help="Repeat each cell N times (default: 1)")
+    parser.add_argument("--build", choices=["release", "debug"], default="release",
+                        help="Cargo build profile for binary path resolution (default: release)")
 
     args = parser.parse_args()
 
@@ -1059,6 +1068,7 @@ Examples:
                         bench_dir=bench_dir,
                         system_info=system_info,
                         dry_run=args.dry_run,
+                        build_profile=args.build,
                     )
 
                     if result:

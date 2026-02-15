@@ -101,7 +101,7 @@ apps:
 
   go-httpd:
     lang: go
-    binary: cmd/httpd/go/httpd
+    binary: cmd/httpd/go/httpd-server
     port: 8083
     model: goroutine
     io: epoll
