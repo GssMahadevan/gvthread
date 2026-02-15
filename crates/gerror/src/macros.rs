@@ -11,12 +11,12 @@
 ///
 /// // With field overrides:
 /// err!(SYS_NET, SUB_LISTENER, ERR_BIND, UC_LISTEN, "bind failed", {
-///     os_error: Some(98),
+///     site_id: SiteId::new(42, 1),
 /// })
 ///
 /// // With source + fields:
 /// err!(SYS_NET, SUB_LISTENER, ERR_BIND, UC_LISTEN, "bind failed", source = io_err, {
-///     os_error: Some(98),
+///     site_id: SiteId::new(42, 1),
 /// })
 /// ```
 #[macro_export]
@@ -277,21 +277,23 @@ mod tests {
 
     #[test]
     fn err_with_fields() {
+        let site = crate::SiteId::new(42, 1);
         let e = err!(SYS_NET, SUB_LISTENER, ERR_BIND, UC_LISTEN, "bind failed", {
-            os_error: Some(98),
+            site_id: site,
         });
-        assert_eq!(e.os_error(), Some(98));
+        assert_eq!(e.site_id(), site);
     }
 
     #[test]
     fn err_with_source_and_fields() {
+        let site = crate::SiteId::new(42, 2);
         let io_err = std::io::Error::new(std::io::ErrorKind::AddrInUse, "taken");
         let e = err!(SYS_NET, SUB_LISTENER, ERR_BIND, UC_LISTEN, "bind failed",
                      source = io_err, {
-            os_error: Some(98),
+            site_id: site,
         });
         assert!(e.source().is_some());
-        assert_eq!(e.os_error(), Some(98));
+        assert_eq!(e.site_id(), site);
     }
 
     #[test]

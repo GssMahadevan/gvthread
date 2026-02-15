@@ -3,39 +3,43 @@ use std::fmt;
 
 use crate::context::ErrorContext;
 use crate::GlobalId;
+use crate::SiteId;
 
 /// Generic Error — a structured, zero-dep error type.
 ///
 /// Two internal representations, same external API:
 ///
-/// - **Simple**: 3 GlobalIds on the stack. Zero heap allocation.  
+/// - **Simple**: 3 GlobalIds + SiteId on the stack. Zero heap allocation.
 ///   Use for hot-path errors like `EAGAIN`, `WouldBlock`, `ConnectionReset`.
 ///
-/// - **Full**: Boxed `ErrorContext` with message, source chain, metadata.  
+/// - **Full**: Boxed `ErrorContext` with message, source chain, metadata.
 ///   Use for diagnostic errors, setup failures, configuration errors.
 ///
 /// Users never see `Repr` — they interact through `.system()`, `.error_code()`,
-/// `.user_code()`, `.kind()`, and `.os_error()`.
+/// `.user_code()`, `.kind()`, and `.site_id()`.
 ///
 /// # Size
 ///
 /// - Production: 32 bytes (16-byte aligned)
 /// - Debug:      80 bytes (16-byte aligned)
 ///
-/// Both variants coexist — pick the right constructor for the situation.
+/// # Site-level Metrics (`feature = "metrics"`)
+///
+/// When the `metrics` feature is enabled, every GError creation with a
+/// non-NONE site_id atomically increments a per-site counter.
+/// Cost: one `AtomicU64::fetch_add(1, Relaxed)`.
 pub struct GError {
     repr: Repr,
 }
 
 enum Repr {
     /// Zero-allocation fast path.
-    /// 3 × GlobalId: system, error_code, user_code.
-    /// Optional os_error packed alongside.
+    /// 3 × GlobalId (8 bytes each in production) + SiteId (8 bytes).
     Simple {
         system:     GlobalId,
         error_code: GlobalId,
         user_code:  GlobalId,
-        os_error:   Option<i32>,
+        site_id:    SiteId,
     },
     /// Heap-allocated full diagnostic context.
     Full(Box<ErrorContext>),
@@ -61,28 +65,32 @@ impl GError {
                 system,
                 error_code,
                 user_code,
-                os_error: None,
+                site_id: SiteId::NONE,
             },
         }
     }
 
-    /// Create a zero-allocation error with an OS errno attached.
+    /// Create a zero-allocation error with a site identifier for metrics.
     ///
-    /// Use when wrapping raw io_uring CQE results or syscall failures
-    /// where the caller may need to inspect the raw errno.
+    /// When `feature = "metrics"` is enabled, this also bumps the
+    /// per-site `AtomicU64` counter. Without the feature, site_id is
+    /// stored but no counter infrastructure exists.
     #[inline]
-    pub fn simple_os(
+    pub fn simple_site(
         system: GlobalId,
         error_code: GlobalId,
         user_code: GlobalId,
-        os_error: i32,
+        site_id: SiteId,
     ) -> Self {
+        #[cfg(feature = "metrics")]
+        crate::metrics::bump(site_id);
+
         Self {
             repr: Repr::Simple {
                 system,
                 error_code,
                 user_code,
-                os_error: Some(os_error),
+                site_id,
             },
         }
     }
@@ -91,6 +99,11 @@ impl GError {
     ///
     /// Prefer the `err!` macro over calling this directly.
     pub fn full(ctx: ErrorContext) -> Self {
+        #[cfg(feature = "metrics")]
+        if !ctx.site_id.is_none() {
+            crate::metrics::bump(ctx.site_id);
+        }
+
         Self {
             repr: Repr::Full(Box::new(ctx)),
         }
@@ -154,12 +167,13 @@ impl GError {
         }
     }
 
-    /// Raw OS errno, if this error wraps a syscall failure.
+    /// The error site identifier for metrics.
+    /// Returns `SiteId::NONE` if not set.
     #[inline]
-    pub fn os_error(&self) -> Option<i32> {
+    pub fn site_id(&self) -> SiteId {
         match &self.repr {
-            Repr::Simple { os_error, .. } => *os_error,
-            Repr::Full(ctx) => ctx.os_error,
+            Repr::Simple { site_id, .. } => *site_id,
+            Repr::Full(ctx) => ctx.site_id,
         }
     }
 
@@ -178,16 +192,16 @@ impl GError {
         }
     }
 
-    /// Consume this error and return the ErrorContext, if available.
+    /// Consume this error and return the ErrorContext.
     /// For Simple errors, constructs a minimal ErrorContext.
     pub fn into_context(self) -> ErrorContext {
         match self.repr {
-            Repr::Simple { system, error_code, user_code, os_error } => {
+            Repr::Simple { system, error_code, user_code, site_id } => {
                 ErrorContext {
                     system,
                     error_code,
                     user_code,
-                    os_error,
+                    site_id,
                     ..Default::default()
                 }
             }
@@ -212,10 +226,10 @@ impl Error for GError {
 impl fmt::Display for GError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.repr {
-            Repr::Simple { system, error_code, user_code, os_error } => {
+            Repr::Simple { system, error_code, user_code, site_id } => {
                 write!(f, "[{}/{}] {}", system, error_code, user_code)?;
-                if let Some(errno) = os_error {
-                    write!(f, " (os error {})", errno)?;
+                if !site_id.is_none() {
+                    write!(f, " ({})", site_id)?;
                 }
                 Ok(())
             }
@@ -228,8 +242,8 @@ impl fmt::Display for GError {
                     write!(f, ": {}", ctx.message)?;
                 }
 
-                if let Some(errno) = ctx.os_error {
-                    write!(f, " (os error {})", errno)?;
+                if !ctx.site_id.is_none() {
+                    write!(f, " ({})", ctx.site_id)?;
                 }
 
                 if let Some(src) = &ctx.source {
@@ -252,12 +266,12 @@ impl fmt::Display for GError {
 impl fmt::Debug for GError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.repr {
-            Repr::Simple { system, error_code, user_code, os_error } => {
+            Repr::Simple { system, error_code, user_code, site_id } => {
                 f.debug_struct("GError::Simple")
                     .field("system", system)
                     .field("error_code", error_code)
                     .field("user_code", user_code)
-                    .field("os_error", os_error)
+                    .field("site_id", site_id)
                     .finish()
             }
             Repr::Full(ctx) => {
@@ -272,9 +286,8 @@ impl fmt::Debug for GError {
 // ── Send + Sync ───────────────────────────────────────────────────
 
 // GError is Send + Sync:
-// - Simple variant: GlobalId is Copy (no references), Option<i32> is trivial
+// - Simple variant: GlobalId is Copy, SiteId is Copy — no references
 // - Full variant: ErrorContext contains Box<dyn Error + Send + Sync>
-// Both are safe to send across threads.
 unsafe impl Send for GError {}
 unsafe impl Sync for GError {}
 
@@ -296,14 +309,17 @@ mod tests {
         assert_eq!(err.system(), &SYS_NET);
         assert_eq!(err.error_code(), &ERR_EAGAIN);
         assert_eq!(err.user_code(), &UC_ACCEPT);
-        assert_eq!(err.os_error(), None);
+        assert!(err.site_id().is_none());
         assert!(err.context().is_none());
     }
 
     #[test]
-    fn simple_with_os_error() {
-        let err = GError::simple_os(SYS_NET, ERR_EAGAIN, UC_ACCEPT, 11);
-        assert_eq!(err.os_error(), Some(11));
+    fn simple_with_site() {
+        let site = SiteId::new(42, 1001);
+        let err = GError::simple_site(SYS_NET, ERR_EAGAIN, UC_ACCEPT, site);
+        assert_eq!(err.site_id(), site);
+        assert_eq!(err.site_id().counter_index(), 42);
+        assert_eq!(err.site_id().unique_id(), 1001);
     }
 
     #[test]
@@ -357,20 +373,22 @@ mod tests {
     }
 
     #[test]
-    fn display_simple_with_errno() {
-        let err = GError::simple_os(SYS_NET, ERR_EAGAIN, UC_ACCEPT, 11);
+    fn display_simple_with_site() {
+        let site = SiteId::new(42, 1001);
+        let err = GError::simple_site(SYS_NET, ERR_EAGAIN, UC_ACCEPT, site);
         let s = format!("{}", err);
-        assert!(s.contains("os error 11"));
+        assert!(s.contains("site:"), "expected site info in: {}", s);
     }
 
     #[test]
     fn into_context_from_simple() {
-        let err = GError::simple_os(SYS_NET, ERR_EAGAIN, UC_ACCEPT, 11);
+        let site = SiteId::new(7, 99);
+        let err = GError::simple_site(SYS_NET, ERR_EAGAIN, UC_ACCEPT, site);
         let ctx = err.into_context();
         assert_eq!(ctx.system, SYS_NET);
         assert_eq!(ctx.error_code, ERR_EAGAIN);
         assert_eq!(ctx.user_code, UC_ACCEPT);
-        assert_eq!(ctx.os_error, Some(11));
+        assert_eq!(ctx.site_id, site);
     }
 
     #[test]
@@ -390,12 +408,13 @@ mod tests {
     #[test]
     fn size_check() {
         let size = std::mem::size_of::<GError>();
-        // Verify alignment
         assert_eq!(size % 16, 0, "GError should be 16-byte aligned, got {} bytes", size);
-        // Print for visibility
+        // Production: GlobalId = 8 bytes (just u64) → Simple = 3×8 + 8(SiteId) = 32
+        // Debug: GlobalId = 24 bytes (u64 + &str) → Simple = 3×24 + 8(SiteId) = 80
         eprintln!("GError size: {} bytes", size);
         eprintln!("Repr size:   {} bytes", std::mem::size_of::<Repr>());
         eprintln!("GlobalId:    {} bytes", std::mem::size_of::<GlobalId>());
+        eprintln!("SiteId:      {} bytes", std::mem::size_of::<SiteId>());
     }
 
     #[test]

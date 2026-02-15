@@ -37,23 +37,20 @@ fn io_error_code(kind: io::ErrorKind) -> GlobalId {
 impl From<io::Error> for GError {
     /// Convert an `io::Error` into a `GError`.
     ///
-    /// Uses the Simple representation for common errors that have no
-    /// additional payload (raw OS errors), and Full for custom io errors
-    /// that carry a source.
+    /// Uses the Simple representation for raw OS errors (zero alloc).
+    /// Custom io errors use Full to preserve the source chain.
     fn from(err: io::Error) -> Self {
         let error_code = io_error_code(err.kind());
-        let os_error = err.raw_os_error();
 
-        // If it's a raw OS error, use the zero-alloc path
-        if let Some(errno) = os_error {
-            return GError::simple_os(SYS_IO, error_code, GlobalId::UNSET, errno);
+        // Raw OS error → zero-alloc Simple path
+        if err.raw_os_error().is_some() {
+            return GError::simple(SYS_IO, error_code, GlobalId::UNSET);
         }
 
-        // Otherwise, wrap with full context to preserve the source
+        // Custom io::Error → Full path to preserve source
         let ctx = ErrorContext {
             system: SYS_IO,
             error_code,
-            os_error,
             #[cfg(not(feature = "production"))]
             message: err.to_string(),
             #[cfg(not(feature = "production"))]
@@ -72,12 +69,8 @@ impl From<io::Error> for GError {
 impl From<GError> for io::Error {
     /// Convert a `GError` back into `io::Error`.
     ///
-    /// If the original error carried a raw OS errno, reconstructs from that.
-    /// Otherwise, wraps the GError as a custom io::Error.
+    /// Wraps the GError as a custom io::Error.
     fn from(err: GError) -> Self {
-        if let Some(errno) = err.os_error() {
-            return io::Error::from_raw_os_error(errno);
-        }
         io::Error::new(io::ErrorKind::Other, err)
     }
 }
@@ -100,9 +93,6 @@ impl From<GError> for io::Error {
 /// ```
 pub trait ResultExt<T> {
     /// Attach a string context message, converting any error into `GError`.
-    ///
-    /// Uses `SYS_IO` as the default system code. For structured codes,
-    /// use `gerr_ctx` instead.
     fn gerr_context(self, msg: &str) -> GResult<T>;
 
     /// Attach structured context with system, error_code, user_code, and message.
@@ -167,23 +157,18 @@ mod tests {
     use super::*;
     use std::error::Error;
 
-    // ECONNRESET=104, EAGAIN=11 on Linux x86-64 (no libc dep)
-    const ECONNRESET: i32 = 104;
-    const EAGAIN: i32 = 11;
-
     #[test]
     fn from_io_error_os() {
-        // Raw OS error — should use Simple path
-        let io_err = io::Error::from_raw_os_error(ECONNRESET);
+        // Raw OS error → Simple path
+        let io_err = io::Error::from_raw_os_error(104); // ECONNRESET
         let gerr = GError::from(io_err);
         assert!(gerr.is_simple());
         assert_eq!(gerr.system(), &SYS_IO);
-        assert_eq!(gerr.os_error(), Some(ECONNRESET));
     }
 
     #[test]
     fn from_io_error_custom() {
-        // Custom io::Error — should use Full path
+        // Custom io::Error → Full path
         let io_err = io::Error::new(io::ErrorKind::AddrInUse, "port taken");
         let gerr = GError::from(io_err);
         assert!(!gerr.is_simple());
@@ -192,14 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn into_io_error_with_errno() {
-        let gerr = GError::simple_os(SYS_IO, GlobalId::UNSET, GlobalId::UNSET, EAGAIN);
-        let io_err: io::Error = gerr.into();
-        assert_eq!(io_err.raw_os_error(), Some(EAGAIN));
-    }
-
-    #[test]
-    fn into_io_error_without_errno() {
+    fn into_io_error() {
         let gerr = GError::simple(SYS_IO, GlobalId::UNSET, GlobalId::UNSET);
         let io_err: io::Error = gerr.into();
         assert_eq!(io_err.kind(), io::ErrorKind::Other);

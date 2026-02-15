@@ -10,6 +10,7 @@ readme = "README.md"
 default = []
 production = []     # strips message, file, line, metadata
 backtrace = []      # captures std::backtrace::Backtrace
+metrics = []        # per-site AtomicU64 counters, registry, Prometheus dump
 
 [dependencies]
 # Zero external dependencies by design.

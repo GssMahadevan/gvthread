@@ -7,15 +7,15 @@
 //!
 //! `GError` has two internal representations:
 //!
-//! - **Simple** (32 bytes, zero heap allocation): three `GlobalId` codes
-//!   identifying the system, error, and user operation. Use for hot-path
-//!   errors like `EAGAIN`, `WouldBlock`, `ConnectionReset`.
+//! - **Simple** (32 bytes prod, zero heap allocation): three `GlobalId` codes
+//!   identifying the system, error, and user operation, plus a `SiteId`
+//!   for per-call-site metrics.
 //!
 //! - **Full** (boxed `ErrorContext`): message, source chain, metadata,
 //!   backtrace. Use for diagnostic errors, setup failures, config errors.
 //!
 //! Both variants expose the same API: `.system()`, `.error_code()`,
-//! `.user_code()`, `.kind()`, `.os_error()`.
+//! `.user_code()`, `.kind()`, `.site_id()`.
 //!
 //! ## Quick Start
 //!
@@ -58,21 +58,27 @@
 //! |--------------|--------|
 //! | `production` | Strips `message`, `file`, `line`, `metadata` at compile time |
 //! | `backtrace`  | Captures `std::backtrace::Backtrace` on error construction |
+//! | `metrics`    | Per-site AtomicU64 counters, registry, Prometheus dump |
 //!
 //! ## Dependencies
 //!
 //! Zero. By design.
 
 mod id;
+mod site;
 mod context;
 mod error;
 #[macro_use]
 mod macros;
 mod convert;
 
+#[cfg(feature = "metrics")]
+pub mod metrics;
+
 // ── Public API ────────────────────────────────────────────────────
 
 pub use id::GlobalId;
+pub use site::SiteId;
 pub use context::ErrorContext;
 pub use error::GError;
 pub use convert::{ResultExt, SYS_IO};
