@@ -48,8 +48,8 @@ fn build_hyper_client(keepalive: bool) -> HyperClient<HttpConnector, Empty<Bytes
     let mut connector = HttpConnector::new();
     connector.set_nodelay(true);
 
-    let builder = HyperClient::builder(TokioExecutor::new())
-        .pool_idle_timeout(if keepalive { Duration::from_secs(90) } else { Duration::ZERO });
+    let mut builder = HyperClient::builder(TokioExecutor::new());
+    builder.pool_idle_timeout(if keepalive { Duration::from_secs(90) } else { Duration::ZERO });
 
     builder.build(connector)
 }

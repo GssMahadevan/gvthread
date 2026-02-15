@@ -33,6 +33,7 @@ python bench/bench-runner.py benches/httpd/manifest.yml --list                  
 python bench/bench-runner.py benches/httpd/manifest.yml --dry-run                # plan, don't execute
 python bench/bench-runner.py benches/httpd/manifest.yml --repeat 3               # statistical runs
 
+python bench/bench-runner.py benches/httpd/manifest.yml --common light    --use-wrk
 
 ```
 
