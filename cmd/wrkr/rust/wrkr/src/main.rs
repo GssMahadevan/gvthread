@@ -3,18 +3,21 @@
 //! Pluggable strategies using battle-tested libraries.
 //! We write measurement + orchestration only.
 //!
-//! ## Strategies (auto-detected from URL scheme)
+//! ## HTTP strategies (selected via gvt_app_http env var)
 //!
-//!   http://   — reqwest (HTTP/1.1, keep-alive, connection pool)
-//!   https://  — reqwest (same, TLS via rustls — zero config)
-//!   echo://   — tokio::net::TcpStream (raw TCP send/recv)
+//!   hyper   — bare HTTP engine, zero-copy parsing, minimal alloc (default)
+//!   reqwest — application-grade client (TLS, cookies, redirects)
 //!
-//! Future: grpc:// (tonic), ws:// (tokio-tungstenite), udp:// (tokio UdpSocket)
+//! ## Protocol strategies (auto-detected from URL scheme)
+//!
+//!   http://   — HTTP/1.1 GET
+//!   https://  — HTTPS GET (reqwest only for now)
+//!   echo://   — raw TCP send/recv via tokio
 //!
 //! ## Usage
 //!
 //!   wrkr http://127.0.0.1:8080/ -c50 -d5
-//!   wrkr https://example.com/ -c20 -d10
+//!   gvt_app_http=reqwest wrkr https://example.com/ -c20 -d10
 //!   wrkr echo://127.0.0.1:9000/ -c50 -d5 --payload 64
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -24,11 +27,102 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-// ═══════════════════════════════════════════════════════════════════
-// HTTP/HTTPS — reqwest handles TLS, pooling, keepalive, parsing
-// ═══════════════════════════════════════════════════════════════════
+// hyper imports
+use http_body_util::{BodyExt, Empty};
+use hyper::body::Bytes;
+use hyper_util::client::legacy::Client as HyperClient;
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::rt::TokioExecutor;
 
-fn build_http_client(keepalive: bool, connections: usize) -> reqwest::Client {
+// ═══════════════════════════════════════════════════════════════════
+// HTTP strategy: hyper — bare engine, minimal overhead
+// ═══════════════════════════════════════════════════════════════════
+//
+// hyper handles:  HTTP/1.1 parsing, keep-alive, pipelining
+// hyper does NOT: TLS, cookies, redirects, compression
+//
+// For benchmarking http:// on localhost this is ideal —
+// zero per-request allocation beyond what HTTP requires.
+
+fn build_hyper_client(keepalive: bool) -> HyperClient<HttpConnector, Empty<Bytes>> {
+    let mut connector = HttpConnector::new();
+    connector.set_nodelay(true);
+
+    let builder = HyperClient::builder(TokioExecutor::new())
+        .pool_idle_timeout(if keepalive { Duration::from_secs(90) } else { Duration::ZERO });
+
+    builder.build(connector)
+}
+
+async fn run_hyper_phase(
+    client: &HyperClient<HttpConnector, Empty<Bytes>>,
+    url: &str,
+    connections: usize,
+    duration: Duration,
+    counter: Arc<AtomicU64>,
+    collect: bool,
+) -> PhaseResult {
+    let stop = Arc::new(AtomicBool::new(false));
+    let start = Instant::now();
+
+    let stop_t = stop.clone();
+    let timer = tokio::spawn(async move {
+        tokio::time::sleep(duration).await;
+        stop_t.store(true, Ordering::Release);
+    });
+
+    let uri: hyper::Uri = url.parse().expect("invalid URL for hyper");
+
+    let mut handles = Vec::with_capacity(connections);
+    for _ in 0..connections {
+        let stop = stop.clone();
+        let client = client.clone();
+        let uri = uri.clone();
+        let counter = counter.clone();
+
+        handles.push(tokio::spawn(async move {
+            let mut r = ConnResult {
+                requests: 0, errors: 0,
+                latencies_ns: Vec::with_capacity(if collect { 200_000 } else { 0 }),
+            };
+
+            while !stop.load(Ordering::Relaxed) {
+                let t = Instant::now();
+                match client.get(uri.clone()).await {
+                    Ok(resp) => {
+                        // Consume body to allow connection reuse
+                        match resp.into_body().collect().await {
+                            Ok(_) => {
+                                let lat = t.elapsed().as_nanos() as u64;
+                                r.requests += 1;
+                                if collect { r.latencies_ns.push(lat); }
+                                counter.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Err(_) => r.errors += 1,
+                        }
+                    }
+                    Err(_) => r.errors += 1,
+                }
+            }
+            r
+        }));
+    }
+
+    timer.await.ok();
+    merge_results(start.elapsed().as_secs_f64(), handles, collect).await
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// HTTP strategy: reqwest — application-grade client
+// ═══════════════════════════════════════════════════════════════════
+//
+// reqwest handles: TLS (rustls), connection pool, keep-alive,
+//                  redirects, cookies, compression, header maps
+//
+// Higher per-request overhead but needed for HTTPS and real-world
+// protocol features.
+
+fn build_reqwest_client(keepalive: bool, connections: usize) -> reqwest::Client {
     let mut builder = reqwest::Client::builder()
         .pool_max_idle_per_host(if keepalive { connections } else { 0 })
         .redirect(reqwest::redirect::Policy::none())
@@ -42,8 +136,61 @@ fn build_http_client(keepalive: bool, connections: usize) -> reqwest::Client {
     builder.build().expect("failed to build reqwest client")
 }
 
+async fn run_reqwest_phase(
+    client: &reqwest::Client,
+    url: &str,
+    connections: usize,
+    duration: Duration,
+    counter: Arc<AtomicU64>,
+    collect: bool,
+) -> PhaseResult {
+    let stop = Arc::new(AtomicBool::new(false));
+    let start = Instant::now();
+
+    let stop_t = stop.clone();
+    let timer = tokio::spawn(async move {
+        tokio::time::sleep(duration).await;
+        stop_t.store(true, Ordering::Release);
+    });
+
+    let mut handles = Vec::with_capacity(connections);
+    for _ in 0..connections {
+        let stop = stop.clone();
+        let client = client.clone();
+        let url = url.to_string();
+        let counter = counter.clone();
+
+        handles.push(tokio::spawn(async move {
+            let mut r = ConnResult {
+                requests: 0, errors: 0,
+                latencies_ns: Vec::with_capacity(if collect { 200_000 } else { 0 }),
+            };
+
+            while !stop.load(Ordering::Relaxed) {
+                let t = Instant::now();
+                match client.get(&url).send().await {
+                    Ok(resp) => match resp.bytes().await {
+                        Ok(_) => {
+                            let lat = t.elapsed().as_nanos() as u64;
+                            r.requests += 1;
+                            if collect { r.latencies_ns.push(lat); }
+                            counter.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(_) => r.errors += 1,
+                    },
+                    Err(_) => r.errors += 1,
+                }
+            }
+            r
+        }));
+    }
+
+    timer.await.ok();
+    merge_results(start.elapsed().as_secs_f64(), handles, collect).await
+}
+
 // ═══════════════════════════════════════════════════════════════════
-// Echo — tokio async TCP
+// Echo strategy — tokio async TCP
 // ═══════════════════════════════════════════════════════════════════
 
 struct EchoConn {
@@ -75,101 +222,6 @@ impl EchoConn {
             total += n;
         }
         Ok(start.elapsed().as_nanos() as u64)
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// Per-connection result
-// ═══════════════════════════════════════════════════════════════════
-
-struct ConnResult {
-    requests: u64,
-    errors: u64,
-    latencies_ns: Vec<u64>,
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// Phase runner — shared across strategies
-// ═══════════════════════════════════════════════════════════════════
-
-struct PhaseResult {
-    duration_sec: f64,
-    total_requests: u64,
-    total_errors: u64,
-    latencies_ns: Vec<u64>,
-}
-
-async fn run_http_phase(
-    client: &reqwest::Client,
-    url: &str,
-    connections: usize,
-    duration: Duration,
-    counter: Arc<AtomicU64>,
-    collect: bool,
-) -> PhaseResult {
-    let stop = Arc::new(AtomicBool::new(false));
-    let start = Instant::now();
-
-    // Timer
-    let stop_t = stop.clone();
-    let timer = tokio::spawn(async move {
-        tokio::time::sleep(duration).await;
-        stop_t.store(true, Ordering::Release);
-    });
-
-    // Spawn one task per connection
-    let mut handles = Vec::with_capacity(connections);
-    for _ in 0..connections {
-        let stop = stop.clone();
-        let client = client.clone(); // reqwest::Client is Arc internally
-        let url = url.to_string();
-        let counter = counter.clone();
-
-        handles.push(tokio::spawn(async move {
-            let mut r = ConnResult {
-                requests: 0, errors: 0,
-                latencies_ns: Vec::with_capacity(if collect { 200_000 } else { 0 }),
-            };
-
-            while !stop.load(Ordering::Relaxed) {
-                let t = Instant::now();
-                match client.get(&url).send().await {
-                    Ok(resp) => match resp.bytes().await {
-                        Ok(_) => {
-                            let lat = t.elapsed().as_nanos() as u64;
-                            r.requests += 1;
-                            if collect { r.latencies_ns.push(lat); }
-                            counter.fetch_add(1, Ordering::Relaxed);
-                        }
-                        Err(_) => r.errors += 1,
-                    },
-                    Err(_) => r.errors += 1,
-                }
-            }
-            r
-        }));
-    }
-
-    timer.await.ok();
-    let elapsed = start.elapsed().as_secs_f64();
-
-    // Merge
-    let mut total_req = 0u64;
-    let mut total_err = 0u64;
-    let mut all_lat = Vec::new();
-    for h in handles {
-        if let Ok(r) = h.await {
-            total_req += r.requests;
-            total_err += r.errors;
-            if collect { all_lat.extend(r.latencies_ns); }
-        }
-    }
-
-    PhaseResult {
-        duration_sec: elapsed,
-        total_requests: total_req,
-        total_errors: total_err,
-        latencies_ns: all_lat,
     }
 }
 
@@ -229,8 +281,31 @@ async fn run_echo_phase(
     }
 
     timer.await.ok();
-    let elapsed = start.elapsed().as_secs_f64();
+    merge_results(start.elapsed().as_secs_f64(), handles, collect).await
+}
 
+// ═══════════════════════════════════════════════════════════════════
+// Shared: ConnResult, PhaseResult, merge
+// ═══════════════════════════════════════════════════════════════════
+
+struct ConnResult {
+    requests: u64,
+    errors: u64,
+    latencies_ns: Vec<u64>,
+}
+
+struct PhaseResult {
+    duration_sec: f64,
+    total_requests: u64,
+    total_errors: u64,
+    latencies_ns: Vec<u64>,
+}
+
+async fn merge_results(
+    elapsed: f64,
+    handles: Vec<tokio::task::JoinHandle<ConnResult>>,
+    collect: bool,
+) -> PhaseResult {
     let mut total_req = 0u64;
     let mut total_err = 0u64;
     let mut all_lat = Vec::new();
@@ -241,7 +316,6 @@ async fn run_echo_phase(
             if collect { all_lat.extend(r.latencies_ns); }
         }
     }
-
     PhaseResult {
         duration_sec: elapsed,
         total_requests: total_req,
@@ -289,8 +363,10 @@ fn compute_stats(lat: &mut Vec<u64>) -> Stats {
     lat.sort_unstable();
     let n = lat.len();
     let sum: u64 = lat.iter().sum();
-    let pct = |p: f64| lat[((p/100.0)*(n as f64 -1.0)).ceil() as usize].min(lat[n-1]) as f64 / 1000.0;
-
+    let pct = |p: f64| -> f64 {
+        let idx = ((p / 100.0) * (n as f64 - 1.0)).ceil() as usize;
+        lat[idx.min(n - 1)] as f64 / 1000.0
+    };
     Stats {
         min_us: lat[0] as f64 / 1000.0,
         max_us: lat[n-1] as f64 / 1000.0,
@@ -301,7 +377,7 @@ fn compute_stats(lat: &mut Vec<u64>) -> Stats {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// JSON output (no serde — fewer deps to compile)
+// JSON output (no serde)
 // ═══════════════════════════════════════════════════════════════════
 
 fn emit_json(strategy: &str, target: &str, connections: usize,
@@ -335,6 +411,12 @@ fn emit_json(strategy: &str, target: &str, connections: usize,
 // CLI
 // ═══════════════════════════════════════════════════════════════════
 
+#[derive(Clone, Copy, PartialEq)]
+enum HttpImpl {
+    Hyper,
+    Reqwest,
+}
+
 struct Cfg {
     url: String,
     connections: usize,
@@ -342,6 +424,7 @@ struct Cfg {
     warmup_sec: u64,
     keepalive: bool,
     payload_size: usize,
+    http_impl: HttpImpl,
 }
 
 fn parse_args() -> Cfg {
@@ -349,6 +432,7 @@ fn parse_args() -> Cfg {
     let mut c = Cfg {
         url: String::new(), connections: 50, duration_sec: 10,
         warmup_sec: 0, keepalive: true, payload_size: 64,
+        http_impl: HttpImpl::Hyper,
     };
 
     let mut i = 1;
@@ -367,10 +451,28 @@ fn parse_args() -> Cfg {
         i += 1;
     }
 
-    // Env overrides (bench-runner integration)
+    // Env overrides
     if let Ok(v) = std::env::var("WRKR_CONNECTIONS") { if let Ok(n) = v.parse() { c.connections = n; } }
     if let Ok(v) = std::env::var("WRKR_DURATION") { if let Ok(n) = v.parse() { c.duration_sec = n; } }
     if let Ok(v) = std::env::var("WRKR_WARMUP") { if let Ok(n) = v.parse() { c.warmup_sec = n; } }
+
+    // HTTP implementation: gvt_app_http=hyper|reqwest
+    if let Ok(v) = std::env::var("gvt_app_http") {
+        match v.as_str() {
+            "reqwest" => c.http_impl = HttpImpl::Reqwest,
+            "hyper" => c.http_impl = HttpImpl::Hyper,
+            other => {
+                eprintln!("wrkr: unknown gvt_app_http={} (use hyper|reqwest)", other);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // HTTPS requires reqwest (hyper needs separate TLS setup)
+    if c.url.starts_with("https://") && c.http_impl == HttpImpl::Hyper {
+        eprintln!("wrkr: https:// requires reqwest, switching gvt_app_http=reqwest");
+        c.http_impl = HttpImpl::Reqwest;
+    }
 
     if c.url.is_empty() { eprintln!("wrkr: missing URL"); eprint_usage(); std::process::exit(1); }
     c
@@ -380,16 +482,22 @@ fn eprint_usage() {
     eprintln!(
 "Usage: wrkr [OPTIONS] <URL>
 
-URL schemes (auto-detected):
-  http://    HTTP/1.1 GET via reqwest
-  https://   HTTPS GET via reqwest + rustls
+URL schemes:
+  http://    HTTP/1.1 GET
+  https://   HTTPS GET (forces reqwest)
   echo://    Raw TCP echo via tokio
+
+Env vars:
+  gvt_app_http=hyper|reqwest   HTTP strategy (default: hyper)
+  WRKR_CONNECTIONS=N           Override -c
+  WRKR_DURATION=N              Override -d
+  WRKR_WARMUP=N                Override --warmup
 
 Options:
   -c  --connections <N>   Concurrent connections (default: 50)
   -d  --duration <SEC>    Measurement duration (default: 10)
       --warmup <SEC>      Warmup duration (default: 0)
-      --no-keepalive      Close connection after each request
+      --no-keepalive      Close after each request
       --payload <BYTES>   Echo payload size (default: 64)
 
 Output: JSON on stdout, progress on stderr.");
@@ -403,28 +511,42 @@ Output: JSON on stdout, progress on stderr.");
 async fn main() {
     let cfg = parse_args();
     let is_echo = cfg.url.starts_with("echo://");
-    let strategy = if is_echo { "echo" }
-                   else if cfg.url.starts_with("https") { "https" }
-                   else { "http" };
+
+    let strategy_name = if is_echo {
+        "echo".to_string()
+    } else {
+        let proto = if cfg.url.starts_with("https") { "https" } else { "http" };
+        let impl_name = match cfg.http_impl { HttpImpl::Hyper => "hyper", HttpImpl::Reqwest => "reqwest" };
+        format!("{}+{}", proto, impl_name)
+    };
 
     eprintln!("wrkr: {} conns, {}s, strategy={}, keepalive={}, target={}",
-        cfg.connections, cfg.duration_sec, strategy, cfg.keepalive, cfg.url);
+        cfg.connections, cfg.duration_sec, strategy_name, cfg.keepalive, cfg.url);
 
     let counter = Arc::new(AtomicU64::new(0));
 
-    let phase = |dur, collect| {
-        let counter = counter.clone();
+    // Dispatch once — build the right client, run phases
+    let run = |dur: Duration, collect: bool, counter: Arc<AtomicU64>| {
         let url = cfg.url.clone();
         let conns = cfg.connections;
         let ka = cfg.keepalive;
         let ps = cfg.payload_size;
+        let http_impl = cfg.http_impl;
         async move {
             if is_echo {
                 let (host, port) = parse_echo_addr(&url);
                 run_echo_phase(&host, port, ps, conns, dur, counter, collect).await
             } else {
-                let client = build_http_client(ka, conns);
-                run_http_phase(&client, &url, conns, dur, counter, collect).await
+                match http_impl {
+                    HttpImpl::Hyper => {
+                        let client = build_hyper_client(ka);
+                        run_hyper_phase(&client, &url, conns, dur, counter, collect).await
+                    }
+                    HttpImpl::Reqwest => {
+                        let client = build_reqwest_client(ka, conns);
+                        run_reqwest_phase(&client, &url, conns, dur, counter, collect).await
+                    }
+                }
             }
         }
     };
@@ -432,7 +554,7 @@ async fn main() {
     // Warmup
     if cfg.warmup_sec > 0 {
         eprintln!("wrkr: warmup ({}s) ...", cfg.warmup_sec);
-        phase(Duration::from_secs(cfg.warmup_sec), false).await;
+        run(Duration::from_secs(cfg.warmup_sec), false, counter.clone()).await;
         counter.store(0, Ordering::Release);
         eprintln!("wrkr: warmup done");
     }
@@ -441,7 +563,7 @@ async fn main() {
     eprintln!("wrkr: measuring ({}s) ...", cfg.duration_sec);
     let (prog_stop, prog_handle) = spawn_progress(counter.clone());
 
-    let mut result = phase(Duration::from_secs(cfg.duration_sec), true).await;
+    let mut result = run(Duration::from_secs(cfg.duration_sec), true, counter.clone()).await;
 
     prog_stop.store(true, Ordering::Release);
     prog_handle.await.ok();
@@ -451,7 +573,7 @@ async fn main() {
         result.total_requests, result.duration_sec,
         result.total_requests as f64 / result.duration_sec, result.total_errors);
 
-    emit_json(strategy, &cfg.url, cfg.connections,
+    emit_json(&strategy_name, &cfg.url, cfg.connections,
         result.duration_sec, result.total_requests, result.total_errors, &stats);
 }
 

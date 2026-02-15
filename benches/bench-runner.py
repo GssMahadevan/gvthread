@@ -396,7 +396,7 @@ def find_wrkr(args):
 
 
 def run_load_generator(wrkr_path, port, threads, connections, duration_sec,
-                       keepalive, cell_tag, is_warmup=False):
+                       keepalive, cell_tag, is_warmup=False, env=None):
     """Run the load generator (wrkr or wrk) and return (metrics_dict, raw_stdout).
 
     If wrkr_path is not None, uses wrkr (JSON output).
@@ -415,8 +415,10 @@ def run_load_generator(wrkr_path, port, threads, connections, duration_sec,
         if not keepalive:
             cmd.append("--no-keepalive")
 
+        # Pass env to wrkr so it gets gvt_app_http and other vars
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout,
+            env=env,
         )
 
         if result.returncode != 0:
@@ -544,6 +546,9 @@ def build_env(common_profile, app_config):
         env_key = f"gvt_app_{k}"
         env[env_key] = str(v)
 
+    # Default wrkr HTTP strategy to hyper (fastest)
+    env.setdefault("gvt_app_http", "hyper")
+
     return env
 
 
@@ -649,8 +654,9 @@ def run_one_cell(
     log(f"  HW:     cores={cpu_cores}, parallelism={parallelism}")
     log(f"  Port:   {port} (per-app, avoids TIME_WAIT)")
     if wrkr_path:
+        http_impl = env.get("gvt_app_http", "hyper")
         log(f"  Load:   wrkr -c{wrk_connections} -d{measure_sec} "
-            f"{'(keepalive)' if keepalive else '(no keepalive)'}")
+            f"http={http_impl} {'(keepalive)' if keepalive else '(no keepalive)'}")
     else:
         log(f"  Load:   wrk -t{wrk_threads} -c{wrk_connections} -d{measure_sec}s "
             f"{'(keepalive)' if keepalive else '(no keepalive)'}")
@@ -727,7 +733,7 @@ def run_one_cell(
             log(f"  Warming up ({warmup_sec}s) ...")
             run_load_generator(
                 wrkr_path, port, wrk_threads, wrk_connections,
-                warmup_sec, keepalive, cell_tag, is_warmup=True,
+                warmup_sec, keepalive, cell_tag, is_warmup=True, env=env,
             )
 
         # ── Check server survived warmup ──
@@ -749,7 +755,7 @@ def run_one_cell(
         log(f"  Measuring ({measure_sec}s) ...")
         metrics, wrk_stdout = run_load_generator(
             wrkr_path, port, wrk_threads, wrk_connections,
-            measure_sec, keepalive, cell_tag, is_warmup=False,
+            measure_sec, keepalive, cell_tag, is_warmup=False, env=env,
         )
 
         if metrics is None:
@@ -812,6 +818,7 @@ def run_one_cell(
 
             # wrk/wrkr config
             "load_gen": load_gen_name,
+            "load_gen_http": env.get("gvt_app_http", "hyper") if wrkr_path else None,
             "wrk_threads": wrk_threads,
             "wrk_connections": wrk_connections,
             "measure_sec": measure_sec,

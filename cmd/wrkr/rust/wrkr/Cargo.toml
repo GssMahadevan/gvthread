@@ -9,11 +9,16 @@ name = "wrkr"
 path = "src/main.rs"
 
 [dependencies]
-# Async runtime — the engine
+# Async runtime
 tokio = { version = "1", features = ["full"] }
 
-# HTTP/HTTPS — let reqwest handle TLS, pooling, keepalive, compression
+# Strategy: reqwest — application-grade HTTP client (easy HTTPS, cookies, redirects)
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+# Strategy: hyper — bare HTTP engine (zero overhead, connection-level control)
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
 
 # gRPC — future (uncomment when needed)
 # tonic = "0.12"
