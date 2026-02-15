@@ -341,6 +341,129 @@ def parse_wrk_output(output):
     return result
 
 
+def parse_wrkr_json(output):
+    """Parse wrkr JSON stdout into the same metric dict format as parse_wrk_output."""
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError:
+        log_err(f"Failed to parse wrkr JSON output")
+        return {}
+
+    result = {}
+    result["requests_per_sec"] = data.get("requests_per_sec", 0)
+    result["total_requests"] = data.get("total_requests", 0)
+
+    lat = data.get("latency_us", {})
+    result["avg_latency_us"] = lat.get("avg")
+    result["p50_us"] = lat.get("p50")
+    result["p75_us"] = lat.get("p75")
+    result["p90_us"] = lat.get("p90")
+    result["p99_us"] = lat.get("p99")
+    result["p99_9_us"] = lat.get("p99.9")
+
+    errs = data.get("errors", {})
+    if any(v > 0 for v in errs.values()):
+        result["errors"] = errs
+
+    if data.get("total_errors", 0) > 0:
+        result["non_2xx"] = data.get("total_errors", 0)
+
+    return result
+
+
+def find_wrkr(args):
+    """Find the wrkr binary.  Returns Path or None."""
+    # Explicit --wrkr flag
+    if hasattr(args, 'wrkr') and args.wrkr:
+        p = Path(args.wrkr)
+        if p.exists():
+            return p
+        log_err(f"wrkr not found at {p}")
+        return None
+
+    # Auto-detect in target/<build>/
+    if ROOT_DIR:
+        p = Path(ROOT_DIR) / "target" / args.build / "wrkr"
+        if p.exists():
+            return p
+
+    # Check PATH
+    w = shutil.which("wrkr")
+    if w:
+        return Path(w)
+
+    return None
+
+
+def run_load_generator(wrkr_path, port, threads, connections, duration_sec,
+                       keepalive, cell_tag, is_warmup=False):
+    """Run the load generator (wrkr or wrk) and return (metrics_dict, raw_stdout).
+
+    If wrkr_path is not None, uses wrkr (JSON output).
+    Otherwise falls back to wrk.
+    """
+    url = f"http://127.0.0.1:{port}/"
+    timeout = duration_sec + 60
+
+    if wrkr_path:
+        cmd = [
+            str(wrkr_path),
+            url,
+            "-c", str(connections),
+            "-t", str(threads),
+            "-d", str(duration_sec),
+        ]
+        if not keepalive:
+            cmd.append("--no-keepalive")
+
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout,
+        )
+
+        if result.returncode != 0:
+            if not is_warmup:
+                log_err(f"[{cell_tag}] wrkr failed (rc={result.returncode})")
+                if result.stderr:
+                    log_err(f"  wrkr stderr: {result.stderr[:300]}")
+            return None, result.stdout
+
+        if is_warmup:
+            return {}, result.stdout
+
+        metrics = parse_wrkr_json(result.stdout)
+        return metrics, result.stdout
+
+    else:
+        # Fallback: wrk
+        cmd = [
+            "wrk",
+            f"-t{threads}",
+            f"-c{connections}",
+            f"-d{duration_sec}s",
+            "--latency",
+        ]
+        if not keepalive:
+            cmd.extend(["-H", "Connection: close"])
+        cmd.append(url)
+
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout,
+        )
+
+        if result.returncode != 0:
+            if not is_warmup:
+                log_err(f"[{cell_tag}] wrk failed (rc={result.returncode})")
+                if result.stderr:
+                    log_err(f"  wrk stderr: {result.stderr[:300]}")
+            return None, result.stdout
+
+        if is_warmup:
+            return {}, result.stdout
+
+        metrics = parse_wrk_output(result.stdout)
+        return metrics, result.stdout
+
+
 # ---------------------------------------------------------------------------
 # Core: manifest loading + validation
 # ---------------------------------------------------------------------------
@@ -455,6 +578,7 @@ def run_one_cell(
     bench_dir, system_info,
     dry_run=False,
     build_profile="release",
+    wrkr_path=None,
 ):
     """
     Run one benchmark cell: one app × one config × one common profile.
@@ -532,9 +656,11 @@ def run_one_cell(
         log_err(f"  Build it first (e.g. cargo build -p {app_name} --{build_profile})")
         return None
 
-    # ── Check wrk exists ──
-    if not shutil.which("wrk"):
-        log_err(f"[{cell_tag}] wrk not found. Install: apt install wrk")
+    # ── Check load generator exists ──
+    load_gen_name = "wrkr" if wrkr_path else "wrk"
+    if not wrkr_path and not shutil.which("wrk"):
+        log_err(f"[{cell_tag}] No load generator found. "
+                f"Build wrkr (cargo build -p wrkr --release) or install wrk (apt install wrk)")
         return None
 
     # ── Kill stale processes on port ──
@@ -577,7 +703,7 @@ def run_one_cell(
         _dump_server_output(server_proc, cell_tag)
         return None
 
-    log(f"  Server ready (pid={server_proc.pid})")
+    log(f"  Server ready (pid={server_proc.pid}), load-gen={load_gen_name}")
 
     result = None
     server_output_dumped = False
@@ -585,17 +711,9 @@ def run_one_cell(
         # ── Warmup ──
         if warmup_sec > 0:
             log(f"  Warming up ({warmup_sec}s) ...")
-            wrk_warmup = [
-                "wrk",
-                f"-t{wrk_threads}",
-                f"-c{wrk_connections}",
-                f"-d{warmup_sec}s",
-                "--latency",
-                f"http://127.0.0.1:{port}/",
-            ]
-            subprocess.run(
-                wrk_warmup,
-                capture_output=True, text=True, timeout=warmup_sec + 30,
+            run_load_generator(
+                wrkr_path, port, wrk_threads, wrk_connections,
+                warmup_sec, keepalive, cell_tag, is_warmup=True,
             )
 
         # ── Check server survived warmup ──
@@ -615,31 +733,12 @@ def run_one_cell(
 
         # ── Measurement ──
         log(f"  Measuring ({measure_sec}s) ...")
-        wrk_cmd = [
-            "wrk",
-            f"-t{wrk_threads}",
-            f"-c{wrk_connections}",
-            f"-d{measure_sec}s",
-            "--latency",
-        ]
-        if not keepalive:
-            wrk_cmd.append("-H")
-            wrk_cmd.append("Connection: close")
-
-        wrk_cmd.append(f"http://127.0.0.1:{port}/")
-
-        wrk_result = subprocess.run(
-            wrk_cmd,
-            capture_output=True, text=True, timeout=measure_sec + 60,
+        metrics, wrk_stdout = run_load_generator(
+            wrkr_path, port, wrk_threads, wrk_connections,
+            measure_sec, keepalive, cell_tag, is_warmup=False,
         )
 
-        wrk_stdout = wrk_result.stdout
-        wrk_stderr = wrk_result.stderr
-
-        if wrk_result.returncode != 0:
-            log_err(f"[{cell_tag}] wrk failed (rc={wrk_result.returncode})")
-            if wrk_stderr:
-                log_err(f"  wrk stderr: {wrk_stderr[:300]}")
+        if metrics is None:
             # Check if server died during measurement
             rc = server_proc.poll()
             if rc is not None:
@@ -655,8 +754,6 @@ def run_one_cell(
             server_output_dumped = True
             return None
 
-        # Parse wrk output
-        metrics = parse_wrk_output(wrk_stdout)
         rps = metrics.get("requests_per_sec", 0)
         p50 = metrics.get("p50_us")
         p99 = metrics.get("p99_us")
@@ -695,7 +792,8 @@ def run_one_cell(
             # App-specific params (unique to this app)
             "app_params": {k: v for k, v in app_config.items() if k != "name"},
 
-            # wrk config
+            # wrk/wrkr config
+            "load_gen": load_gen_name,
             "wrk_threads": wrk_threads,
             "wrk_connections": wrk_connections,
             "measure_sec": measure_sec,
@@ -945,6 +1043,10 @@ Examples:
     parser.add_argument("--repeat", type=int, default=1, help="Repeat each cell N times (default: 1)")
     parser.add_argument("--build", choices=["release", "debug"], default="release",
                         help="Cargo build profile for binary path resolution (default: release)")
+    parser.add_argument("--wrkr", metavar="PATH",
+                        help="Path to wrkr binary (default: auto-detect in target/<build>/)")
+    parser.add_argument("--use-wrk", action="store_true",
+                        help="Force using wrk instead of wrkr")
 
     args = parser.parse_args()
 
@@ -1036,6 +1138,19 @@ Examples:
     results_dir.mkdir(parents=True, exist_ok=True)
     reports_dir.mkdir(parents=True, exist_ok=True)
 
+    # ── Detect load generator ──
+    wrkr_path = None
+    if not args.use_wrk:
+        wrkr_path = find_wrkr(args)
+    if wrkr_path:
+        log(f"Load generator: wrkr ({wrkr_path})")
+    elif shutil.which("wrk"):
+        log(f"Load generator: wrk (fallback)")
+    else:
+        log_err("No load generator found. Build wrkr (cargo build -p wrkr --release) "
+                "or install wrk (apt install wrk)")
+        sys.exit(1)
+
     # ── Run the matrix ──
     all_results_by_profile = {}
 
@@ -1070,6 +1185,7 @@ Examples:
                         system_info=system_info,
                         dry_run=args.dry_run,
                         build_profile=args.build,
+                        wrkr_path=wrkr_path,
                     )
 
                     if result:

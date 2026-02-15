@@ -1,0 +1,24 @@
+[package]
+name = "wrkr"
+version = "0.1.0"
+edition = "2021"
+description = "Benchmark load generator with pluggable protocol strategies"
+
+[[bin]]
+name = "wrkr"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime — the engine
+tokio = { version = "1", features = ["full"] }
+
+# HTTP/HTTPS — let reqwest handle TLS, pooling, keepalive, compression
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+# gRPC — future (uncomment when needed)
+# tonic = "0.12"
+# prost = "0.13"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
