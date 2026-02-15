@@ -108,8 +108,11 @@ apps:
     configs:
       - name: naive
         variant: naive
-      - name: pooled
-        variant: pooled
+      - name: mux
+        variant: mux
+      - name: fiber
+        variant: fiber
+
 
   # Future: uncomment when ready
   # go-gin-httpd:
