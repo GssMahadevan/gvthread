@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"runtime"
 	"sync/atomic"
 	"time"
 )
@@ -36,12 +37,28 @@ func main() {
 		}
 	}
 
+	// Bench-runner env vars override CLI defaults (but not explicit flags)
+	if envPort := os.Getenv("gvt_app_port"); envPort != "" {
+		var p int
+		if _, err := fmt.Sscanf(envPort, "%d", &p); err == nil {
+			*port = p
+		}
+	}
+
+	// GOMAXPROCS from gvt_parallelism
+	if envPar := os.Getenv("gvt_parallelism"); envPar != "" {
+		var p int
+		if _, err := fmt.Sscanf(envPar, "%d", &p); err == nil && p > 0 {
+			runtime.GOMAXPROCS(p)
+		}
+	}
+
 	fileMode := *dir != ""
 	modeStr := "hello"
 	if fileMode {
 		modeStr = fmt.Sprintf("file(%s)", *dir)
 	}
-	fmt.Fprintf(os.Stderr, "go-httpd: port=%d mode=%s\n", *port, modeStr)
+	fmt.Fprintf(os.Stderr, "go-httpd: port=%d mode=%s GOMAXPROCS=%d\n", *port, modeStr, runtime.GOMAXPROCS(0))
 
 	// Stats printer
 	start := time.Now()

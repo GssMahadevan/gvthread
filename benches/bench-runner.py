@@ -570,10 +570,11 @@ def run_one_cell(
                 except (ValueError, AttributeError):
                     sig_name = f" (signal {-rc})"
             log_err(f"  Server CRASHED during startup (exit={rc}{sig_name})")
-        _dump_server_output(server_proc, cell_tag)
-        if server_proc.poll() is None:
+        else:
+            log_err(f"  Server is running but not on port {port} — killing")
             server_proc.kill()
-            server_proc.wait()
+            server_proc.wait(timeout=5)
+        _dump_server_output(server_proc, cell_tag)
         return None
 
     log(f"  Server ready (pid={server_proc.pid})")
