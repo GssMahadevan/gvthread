@@ -410,7 +410,6 @@ def run_load_generator(wrkr_path, port, threads, connections, duration_sec,
             str(wrkr_path),
             url,
             "-c", str(connections),
-            "-t", str(threads),
             "-d", str(duration_sec),
         ]
         if not keepalive:
@@ -549,10 +548,21 @@ def build_env(common_profile, app_config):
 
 
 def _dump_server_output(server_proc, cell_tag):
-    """Read and display any buffered stdout/stderr from a server process."""
+    """Read and display any buffered stdout/stderr from a server process.
+
+    IMPORTANT: process must be dead before calling this.
+    .read() on pipes of a live process blocks forever.
+    Safety: kill if still alive.
+    """
+    # Safety: ensure process is dead before reading pipes
+    if server_proc.poll() is None:
+        server_proc.kill()
+        try:
+            server_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
     try:
-        # Non-blocking read of whatever's available
-        # If process is dead, read() returns everything buffered
         stdout = server_proc.stdout.read().decode(errors="replace") if server_proc.stdout else ""
         stderr = server_proc.stderr.read().decode(errors="replace") if server_proc.stderr else ""
     except Exception:
@@ -638,8 +648,12 @@ def run_one_cell(
         f"{', '.join(f'{k}={v}' for k, v in app_config.items() if k != 'name') or '(defaults)'}")
     log(f"  HW:     cores={cpu_cores}, parallelism={parallelism}")
     log(f"  Port:   {port} (per-app, avoids TIME_WAIT)")
-    log(f"  Load:   wrk -t{wrk_threads} -c{wrk_connections} -d{measure_sec}s "
-        f"{'(keepalive)' if keepalive else '(no keepalive)'}")
+    if wrkr_path:
+        log(f"  Load:   wrkr -c{wrk_connections} -d{measure_sec} "
+            f"{'(keepalive)' if keepalive else '(no keepalive)'}")
+    else:
+        log(f"  Load:   wrk -t{wrk_threads} -c{wrk_connections} -d{measure_sec}s "
+            f"{'(keepalive)' if keepalive else '(no keepalive)'}")
     log(f"  Binary: {binary_path} ({build_profile})")
 
     # Print exported env vars
@@ -750,6 +764,10 @@ def run_one_cell(
                     except (ValueError, AttributeError):
                         sig_name = f" (signal {-rc})"
                 log_err(f"  Server CRASHED during measurement (exit={rc}{sig_name})")
+            else:
+                # Server still alive — kill before reading pipes (avoids blocking)
+                server_proc.kill()
+                server_proc.wait(timeout=5)
             _dump_server_output(server_proc, cell_tag)
             server_output_dumped = True
             return None
