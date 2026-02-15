@@ -98,3 +98,4 @@ cmd/*/go/main
 #
 benches/*/results/
 benches/*/reports/
+pdocs/

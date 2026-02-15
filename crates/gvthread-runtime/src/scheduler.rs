@@ -30,6 +30,37 @@ pub(crate) static mut SCHEDULER: Option<Scheduler> = None;
 static SCHEDULER_INIT: AtomicBool = AtomicBool::new(false);
 static SCHEDULER_RUNNING: AtomicBool = AtomicBool::new(false);
 
+// ── Worker I/O hooks ────────────────────────────────────────────────
+//
+// These allow an external I/O layer (e.g. per-worker io_uring) to
+// integrate with the worker loop.  The hooks are set once at startup
+// and never changed, so unsynchronized static access is safe.
+//
+//   poll(worker_id) → usize   — non-blocking CQE drain, returns #woken
+//   has_io(worker_id) → bool  — any inflight SQEs on this worker?
+//   wait_io(worker_id) → usize — blocking wait for ≥1 CQE, returns #woken
+
+static mut WORKER_POLL_FN:    Option<fn(usize) -> usize> = None;
+static mut WORKER_HAS_IO_FN:  Option<fn(usize) -> bool>  = None;
+static mut WORKER_WAIT_IO_FN: Option<fn(usize) -> usize> = None;
+
+/// Install worker I/O hooks.  Must be called before `start_global_scheduler`.
+///
+/// - `poll`:    non-blocking drain of completions, returns GVThreads woken
+/// - `has_io`:  returns true if this worker has inflight I/O
+/// - `wait_io`: blocking wait for ≥1 completion (used when idle + inflight)
+pub fn set_worker_io_hooks(
+    poll:    fn(usize) -> usize,
+    has_io:  fn(usize) -> bool,
+    wait_io: fn(usize) -> usize,
+) {
+    unsafe {
+        WORKER_POLL_FN    = Some(poll);
+        WORKER_HAS_IO_FN  = Some(has_io);
+        WORKER_WAIT_IO_FN = Some(wait_io);
+    }
+}
+
 /// Per-worker scheduler context
 /// 
 /// Each worker stores its "scheduler context" here - the register state
@@ -369,6 +400,13 @@ fn worker_main_loop(worker_id: usize, is_low_priority: bool, debug: bool) {
             break;
         }
         
+        // ── Poll worker-local I/O for completions ──
+        // This wakes GVThreads whose I/O completed and pushes them
+        // to the ready queue (typically this worker's local queue).
+        if let Some(poll_fn) = unsafe { WORKER_POLL_FN } {
+            poll_fn(worker_id);
+        }
+        
         // Try to get next GVThread
         let next = unsafe {
             if let Some(ref sched) = SCHEDULER {
@@ -386,8 +424,21 @@ fn worker_main_loop(worker_id: usize, is_low_priority: bool, debug: bool) {
                 run_gvthread(worker_id, id, priority, debug);
             }
             None => {
-                // No work available
-                if idle_spins < spin_limit {
+                // No work available — check if we have inflight I/O
+                let has_io = unsafe {
+                    WORKER_HAS_IO_FN.map(|f| f(worker_id)).unwrap_or(false)
+                };
+                
+                if has_io {
+                    // We have inflight I/O but no ready GVThreads.
+                    // Block on io_uring until a CQE arrives — this is the
+                    // most efficient wait (kernel wakes us instantly on I/O
+                    // completion, zero CPU waste).
+                    if let Some(wait_fn) = unsafe { WORKER_WAIT_IO_FN } {
+                        wait_fn(worker_id);
+                    }
+                    idle_spins = 0;
+                } else if idle_spins < spin_limit {
                     // Quick spin first (catch fast ready→run cycles)
                     idle_spins += 1;
                     for _ in 0..32 {

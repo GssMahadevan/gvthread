@@ -4,13 +4,17 @@
 //! the ksvc_* syscall wrappers. These give a Go-like programming model:
 //!
 //! ```ignore
-//! let listener = GvtListener::bind(reactor, 8080)?;
+//! // Worker-local path (per-worker io_uring, no cross-thread hops):
+//! let listener = GvtListener::bind_local(8080)?;
 //! loop {
 //!     let stream = listener.accept()?;
 //!     gvthread::spawn(move |_| {
 //!         handle_connection(stream);
 //!     });
 //! }
+//!
+//! // Shared reactor path (legacy):
+//! let listener = GvtListener::bind(reactor.shared(), 8080)?;
 //! ```
 
 use crate::reactor::ReactorShared;
@@ -18,21 +22,43 @@ use crate::syscall::*;
 
 use std::sync::Arc;
 
-/// A TCP listener bound to a port, using KSVC io_uring for accept().
+/// A TCP listener bound to a port, using io_uring for accept().
+///
+/// Supports two I/O paths:
+/// - **Worker-local** (`shared = None`): submits directly to the worker's
+///   io_uring.  No MPSC, no cross-thread hop, no lock contention.
+/// - **Shared reactor** (`shared = Some(...)`): legacy path via MPSC queue
+///   to a dedicated reactor thread.
 pub struct GvtListener {
     fd: i32,
-    shared: Arc<ReactorShared>,
+    shared: Option<Arc<ReactorShared>>,
 }
 
 impl GvtListener {
     /// Create a listener from an existing fd + reactor shared state.
     pub fn from_raw(fd: i32, shared: Arc<ReactorShared>) -> Self {
-        Self { fd, shared }
+        Self { fd, shared: Some(shared) }
     }
 
-    /// Bind and listen on a port. Uses traditional syscalls for setup
-    /// (bind/listen are one-shot, no need for io_uring).
+    /// Create a listener from an existing fd, using worker-local I/O.
+    pub fn from_raw_local(fd: i32) -> Self {
+        Self { fd, shared: None }
+    }
+
+    /// Bind and listen on a port using the shared reactor.
     pub fn bind(shared: Arc<ReactorShared>, port: u16) -> Result<Self, i32> {
+        let fd = Self::bind_socket(port)?;
+        Ok(Self { fd, shared: Some(shared) })
+    }
+
+    /// Bind and listen on a port using worker-local io_uring.
+    pub fn bind_local(port: u16) -> Result<Self, i32> {
+        let fd = Self::bind_socket(port)?;
+        Ok(Self { fd, shared: None })
+    }
+
+    /// Common socket setup: create, setsockopt, bind, listen.
+    fn bind_socket(port: u16) -> Result<i32, i32> {
         let fd = unsafe {
             libc::socket(
                 libc::AF_INET,
@@ -90,7 +116,7 @@ impl GvtListener {
 
         unsafe { libc::listen(fd, 4096); }
 
-        Ok(Self { fd, shared })
+        Ok(fd)
     }
 
     /// Accept a connection. Blocks the calling GVThread until a client connects.
@@ -101,13 +127,21 @@ impl GvtListener {
         let mut addr_len: libc::socklen_t =
             std::mem::size_of::<libc::sockaddr_in>() as u32;
 
-        let client_fd = ksvc_accept4(
-            &self.shared,
-            self.fd,
-            &mut addr as *mut _ as *mut libc::sockaddr,
-            &mut addr_len,
-            libc::SOCK_CLOEXEC,
-        );
+        let client_fd = match &self.shared {
+            Some(shared) => ksvc_accept4(
+                shared,
+                self.fd,
+                &mut addr as *mut _ as *mut libc::sockaddr,
+                &mut addr_len,
+                libc::SOCK_CLOEXEC,
+            ),
+            None => wr_accept4(
+                self.fd,
+                &mut addr as *mut _ as *mut libc::sockaddr,
+                &mut addr_len,
+                libc::SOCK_CLOEXEC,
+            ),
+        };
 
         if client_fd < 0 {
             return Err(client_fd);
@@ -143,38 +177,57 @@ impl Drop for GvtListener {
     }
 }
 
-/// A TCP stream (connection), using KSVC io_uring for read/write.
+/// A TCP stream (connection), using io_uring for read/write.
+///
+/// When `shared` is `None`, uses worker-local io_uring (zero cross-thread).
 pub struct GvtStream {
     fd: i32,
-    shared: Arc<ReactorShared>,
+    shared: Option<Arc<ReactorShared>>,
 }
 
 impl GvtStream {
-    /// Create a stream from a raw fd.
+    /// Create a stream from a raw fd (shared reactor path).
     pub fn from_raw(fd: i32, shared: Arc<ReactorShared>) -> Self {
-        Self { fd, shared }
+        Self { fd, shared: Some(shared) }
+    }
+
+    /// Create a stream from a raw fd (worker-local path).
+    pub fn from_raw_local(fd: i32) -> Self {
+        Self { fd, shared: None }
     }
 
     /// Read into buffer. Blocks the GVThread until data is available.
     /// Returns bytes read, 0 for EOF, or negative errno.
     pub fn read(&self, buf: &mut [u8]) -> i64 {
-        ksvc_recv(&self.shared, self.fd, buf, 0)
+        match &self.shared {
+            Some(s) => ksvc_recv(s, self.fd, buf, 0),
+            None => wr_recv(self.fd, buf, 0),
+        }
     }
 
     /// Write buffer. Blocks until all bytes are sent.
     /// Returns total bytes written or negative errno.
     pub fn write_all(&self, buf: &[u8]) -> i64 {
-        ksvc_send_all(&self.shared, self.fd, buf)
+        match &self.shared {
+            Some(s) => ksvc_send_all(s, self.fd, buf),
+            None => wr_send_all(self.fd, buf),
+        }
     }
 
     /// Write buffer (single send). Returns bytes sent or negative errno.
     pub fn write(&self, buf: &[u8]) -> i64 {
-        ksvc_send(&self.shared, self.fd, buf, 0)
+        match &self.shared {
+            Some(s) => ksvc_send(s, self.fd, buf, 0),
+            None => wr_send(self.fd, buf, 0),
+        }
     }
 
     /// Close the connection via io_uring.
     pub fn close_uring(&self) -> i64 {
-        ksvc_close(&self.shared, self.fd)
+        match &self.shared {
+            Some(s) => ksvc_close(s, self.fd),
+            None => wr_close(self.fd),
+        }
     }
 
     /// Get the raw fd.
@@ -183,8 +236,8 @@ impl GvtStream {
     }
 
     /// Get the reactor shared state (for passing to sub-operations).
-    pub fn shared(&self) -> &Arc<ReactorShared> {
-        &self.shared
+    pub fn shared(&self) -> Option<&Arc<ReactorShared>> {
+        self.shared.as_ref()
     }
 }
 

@@ -73,10 +73,12 @@
 //! - **Stack-safe**: GVThread stacks are stable while blocked (no move/invalidation)
 
 pub mod reactor;
+pub mod worker_reactor;
 pub mod syscall;
 pub mod net;
 
 // Re-export the main types
 pub use reactor::{Reactor, ReactorConfig, ReactorShared};
+pub use worker_reactor::WorkerReactorPool;
 pub use syscall::*;
 pub use net::{GvtListener, GvtStream};

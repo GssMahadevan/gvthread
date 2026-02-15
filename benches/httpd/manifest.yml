@@ -65,10 +65,23 @@ apps:
       - name: big-ring
         sq_entries: 2048
 
-  gvthread-httpd:
+  gvthread0-httpd:
     lang: rust
-    binary: target/release/gvthread-httpd
+    binary: target/release/gvthread0-httpd
     port: 8081
+    model: green-thread
+    io: io_uring
+    configs:
+      - name: default
+      - name: big-ring
+        sq_entries: 2048
+        max_gvthreads: 200000
+
+
+  gvthread1-httpd:
+    lang: rust
+    binary: target/release/gvthread1-httpd
+    port: 8084
     model: green-thread
     io: io_uring
     configs:

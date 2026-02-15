@@ -1,0 +1,33 @@
+[package]
+name = "gvthread1-httpd"
+description = "HTTP/1.1 server — one GVThread1 per connection, io_uring via ksvc-gvthread"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "gvthread1-httpd"
+path = "src/main.rs"
+
+[dependencies]
+gvthread.workspace = true
+gvthread-core.workspace = true
+gvthread-runtime.workspace = true
+ksvc-gvthread = { path = "../../../../crates/ksvc-gvthread" }
+libc.workspace = true
+
+[profile.release]
+#opt-level = 3
+#lto = true
+#codegen-units = 1
+debug = 1
+
+
+[profile.dev]
+opt-level = 1
+
+[profile.bench]
+opt-level = 3
+debug = false

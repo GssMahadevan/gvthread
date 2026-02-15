@@ -245,3 +245,117 @@ pub fn ksvc_send_all(shared: &ReactorShared, fd: i32, mut buf: &[u8]) -> i64 {
     }
     total as i64
 }
+
+// ══════════════════════════════════════════════════════════════════════
+// Worker-local path — submit directly to this worker's io_uring
+// ══════════════════════════════════════════════════════════════════════
+
+use crate::worker_reactor;
+
+/// Submit a syscall to this worker's io_uring and block until completion.
+///
+/// This is the per-worker equivalent of `submit_and_park`.  Instead of
+/// pushing to an MPSC queue (cross-thread hop), we submit the SQE inline
+/// to the worker-local io_uring ring.  The worker loop polls CQEs and
+/// wakes us on the same core — zero lock contention, zero cache bouncing.
+///
+/// # Panics
+/// Panics if called outside a GVThread context or if the worker reactor
+/// pool has not been initialized.
+#[inline]
+fn submit_and_park_worker(syscall_nr: u32, args: [u64; 6]) -> i64 {
+    let gvt_id = gvthread_runtime::tls::current_gvthread_id();
+    assert!(!gvt_id.is_none(), "ksvc_syscall called outside GVThread");
+    let slot = gvt_id.as_u32();
+
+    let worker_id = gvthread_runtime::tls::try_current_worker_id()
+        .expect("ksvc_syscall: not on a worker thread");
+
+    let pool = worker_reactor::global_pool();
+
+    // Submit SQE directly to this worker's io_uring (inline, no MPSC!)
+    pool.submit(worker_id, slot, syscall_nr, &args);
+
+    // Block this GVThread — worker is free to run others + poll CQEs
+    scheduler::block_current();
+
+    // Woken! Result was written to the slab by this worker's poll loop.
+    pool.read_result(slot)
+}
+
+// ── Worker-local typed wrappers ──
+
+/// Worker-local read.  Same semantics as `ksvc_read` but uses per-worker io_uring.
+#[inline]
+pub fn wr_read(fd: i32, buf: &mut [u8]) -> i64 {
+    submit_and_park_worker(NR_READ, [
+        fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64,
+        0, 0, 0,
+    ])
+}
+
+/// Worker-local write.
+#[inline]
+pub fn wr_write(fd: i32, buf: &[u8]) -> i64 {
+    submit_and_park_worker(NR_WRITE, [
+        fd as u64, buf.as_ptr() as u64, buf.len() as u64,
+        0, 0, 0,
+    ])
+}
+
+/// Worker-local close.
+#[inline]
+pub fn wr_close(fd: i32) -> i64 {
+    submit_and_park_worker(NR_CLOSE, [fd as u64, 0, 0, 0, 0, 0])
+}
+
+/// Worker-local accept4.
+#[inline]
+pub fn wr_accept4(
+    listener_fd: i32,
+    addr: *mut libc::sockaddr,
+    addrlen: *mut libc::socklen_t,
+    flags: i32,
+) -> i64 {
+    submit_and_park_worker(NR_ACCEPT4, [
+        listener_fd as u64, addr as u64, addrlen as u64,
+        flags as u64, 0, 0,
+    ])
+}
+
+/// Worker-local recv.
+#[inline]
+pub fn wr_recv(fd: i32, buf: &mut [u8], flags: i32) -> i64 {
+    submit_and_park_worker(NR_RECVFROM, [
+        fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64,
+        flags as u64, 0, 0,
+    ])
+}
+
+/// Worker-local send.
+#[inline]
+pub fn wr_send(fd: i32, buf: &[u8], flags: i32) -> i64 {
+    submit_and_park_worker(NR_SENDTO, [
+        fd as u64, buf.as_ptr() as u64, buf.len() as u64,
+        flags as u64, 0, 0,
+    ])
+}
+
+/// Worker-local send_all (retries partial writes).
+pub fn wr_send_all(fd: i32, mut buf: &[u8]) -> i64 {
+    let mut total: usize = 0;
+    while !buf.is_empty() {
+        let n = wr_send(fd, buf, 0);
+        if n < 0 {
+            if n == -(libc::EAGAIN as i64) || n == -(libc::EINTR as i64) {
+                gvthread::yield_now();
+                continue;
+            }
+            return n;
+        }
+        let n = n as usize;
+        total += n;
+        buf = &buf[n..];
+    }
+    total as i64
+}

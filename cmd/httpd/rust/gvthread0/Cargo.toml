@@ -1,6 +1,6 @@
 [package]
-name = "gvthread-httpd"
-description = "HTTP/1.1 server — one GVThread per connection, io_uring via ksvc-gvthread"
+name = "gvthread0-httpd"
+description = "HTTP/1.1 server — one GVThread0 per connection, io_uring via ksvc-gvthread"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [[bin]]
-name = "gvthread-httpd"
+name = "gvthread0-httpd"
 path = "src/main.rs"
 
 [dependencies]
